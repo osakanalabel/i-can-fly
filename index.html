@@ -1,0 +1,461 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>助走ジャンプゲーム</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            -webkit-tap-highlight-color: transparent;
+        }
+
+        body {
+            font-family: 'Arial', sans-serif;
+            background: #87CEEB;
+            overflow: hidden;
+            touch-action: none;
+        }
+
+        #gameContainer {
+            width: 100vw;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        #gameArea {
+            flex: 1;
+            position: relative;
+            overflow: hidden;
+        }
+
+        #canvas {
+            width: 100%;
+            height: 100%;
+            display: block;
+        }
+
+        #ui {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            right: 10px;
+            color: white;
+            font-size: 18px;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.5);
+            pointer-events: none;
+        }
+
+        #score {
+            font-size: 24px;
+            font-weight: bold;
+        }
+
+        #speedMeter {
+            margin-top: 10px;
+            background: rgba(0,0,0,0.3);
+            border-radius: 10px;
+            padding: 5px 10px;
+            display: inline-block;
+        }
+
+        #speedBar {
+            width: 150px;
+            height: 20px;
+            background: rgba(255,255,255,0.3);
+            border-radius: 5px;
+            overflow: hidden;
+            display: inline-block;
+            vertical-align: middle;
+            margin-left: 10px;
+        }
+
+        #speedFill {
+            height: 100%;
+            background: linear-gradient(to right, #4CAF50, #FFC107, #F44336);
+            width: 0%;
+            transition: width 0.1s;
+        }
+
+        #controls {
+            height: 180px;
+            display: flex;
+            gap: 20px;
+            padding: 20px;
+            background: rgba(0,0,0,0.1);
+        }
+
+        .btn {
+            flex: 1;
+            border-radius: 20px;
+            border: none;
+            font-size: 24px;
+            font-weight: bold;
+            color: white;
+            cursor: pointer;
+            user-select: none;
+            box-shadow: 0 4px 8px rgba(0,0,0,0.3);
+            transition: transform 0.1s;
+            touch-action: none;
+        }
+
+        .btn:active {
+            transform: scale(0.95);
+        }
+
+        #runBtn {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        }
+
+        #jumpBtn {
+            background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+        }
+
+        #message {
+            position: absolute;
+            top: 40%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            font-size: 32px;
+            font-weight: bold;
+            color: white;
+            text-shadow: 3px 3px 6px rgba(0,0,0,0.7);
+            text-align: center;
+            pointer-events: none;
+        }
+
+        #title {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            font-size: 48px;
+            font-weight: bold;
+            color: white;
+            text-shadow: 4px 4px 8px rgba(0,0,0,0.8);
+            pointer-events: none;
+        }
+    </style>
+</head>
+<body>
+    <div id="gameContainer">
+        <div id="gameArea">
+            <canvas id="canvas"></canvas>
+            <div id="ui">
+                <div id="score">スコア: 0</div>
+                <div id="speedMeter">
+                    速度
+                    <div id="speedBar"><div id="speedFill"></div></div>
+                </div>
+            </div>
+            <div id="message"></div>
+            <div id="title">I CAN FLY !!</div>
+        </div>
+        <div id="controls">
+            <button class="btn" id="runBtn">助走</button>
+            <button class="btn" id="jumpBtn">ジャンプ</button>
+        </div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const runBtn = document.getElementById('runBtn');
+        const jumpBtn = document.getElementById('jumpBtn');
+        const scoreEl = document.getElementById('score');
+        const speedFill = document.getElementById('speedFill');
+        const messageEl = document.getElementById('message');
+        const titleEl = document.getElementById('title');
+
+        let width, height;
+        let player, building, target;
+        let gameState = 'ready'; // ready, running, jumping, landed, failed
+        let isRunning = false;
+        let isChargingJump = false;
+        let jumpAngle = 0;
+        let score = 0;
+        let animationId;
+
+        function resize() {
+            const rect = canvas.getBoundingClientRect();
+            width = canvas.width = rect.width;
+            height = canvas.height = rect.height;
+            init();
+        }
+
+        function init() {
+            const buildingWidth = width * 0.3;
+            const buildingHeight = height * 0.4;
+
+            building = {
+                x: 0,
+                y: height - buildingHeight,
+                width: buildingWidth,
+                height: buildingHeight
+            };
+
+            const minTargetX = buildingWidth + width * 0.2;
+            const maxTargetX = width * 0.9;
+            const targetX = minTargetX + Math.random() * (maxTargetX - minTargetX);
+            const targetWidth = width * 0.15;
+            const targetY = height - 80;
+
+            target = {
+                x: targetX,
+                y: targetY,
+                width: targetWidth,
+                height: 60,
+                centerX: targetX + targetWidth / 2
+            };
+
+            player = {
+                x: buildingWidth * 0.2,
+                y: building.y - 30,
+                size: 30,
+                speed: 0,
+                maxSpeed: 8,
+                acceleration: 0.2,
+                deceleration: 0.3,
+                vx: 0,
+                vy: 0,
+                rotation: 0,
+                shakeOffset: 0
+            };
+
+            gameState = 'ready';
+            isRunning = false;
+            messageEl.textContent = '';
+            titleEl.style.display = 'block';
+            runBtn.textContent = '助走';
+        }
+
+        function update() {
+            if (gameState === 'ready' || gameState === 'running') {
+                // 助走の加速・減速
+                if (isRunning) {
+                    player.speed = Math.min(player.speed + player.acceleration, player.maxSpeed);
+                } else {
+                    player.speed = Math.max(player.speed - player.deceleration, 0);
+                }
+
+                // 角度調整中は停止して震える
+                if (isChargingJump) {
+                    player.speed = 0;
+                    player.shakeOffset = Math.sin(Date.now() / 50) * 2;
+                    jumpAngle += 8;
+                    if (jumpAngle >= 360) jumpAngle = 0;
+                } else {
+                    player.shakeOffset = 0;
+                    player.x += player.speed;
+                }
+
+                // ビルの端に到達したかチェック
+                if (player.x + player.size > building.width) {
+                    if (!isChargingJump) {
+                        // ジャンプせずに落下
+                        gameState = 'failed';
+                        player.vy = 0;
+                        player.vx = player.speed;
+                        showMessage('踏み切り失敗！');
+                    }
+                }
+
+                speedFill.style.width = (player.speed / player.maxSpeed * 100) + '%';
+            }
+
+            if (gameState === 'jumping') {
+                const gravity = 0.5;
+                player.vx *= 0.995;
+                player.vy += gravity;
+                player.x += player.vx;
+                player.y += player.vy;
+                player.rotation += 5;
+
+                // 着地判定
+                if (player.y >= target.y - player.size) {
+                    player.y = target.y - player.size;
+                    gameState = 'landed';
+                    calculateScore();
+                }
+            }
+
+            if (gameState === 'failed') {
+                const gravity = 0.5;
+                player.vy += gravity;
+                player.y += player.vy;
+            }
+        }
+
+        function draw() {
+            ctx.clearRect(0, 0, width, height);
+
+            // ビル
+            ctx.fillStyle = '#555';
+            ctx.fillRect(building.x, building.y, building.width, building.height);
+            ctx.fillStyle = '#666';
+            for (let i = 0; i < 5; i++) {
+                for (let j = 0; j < 3; j++) {
+                    const wx = building.width / 6 + j * (building.width / 4);
+                    const wy = building.y + 20 + i * 60;
+                    ctx.fillRect(wx, wy, 30, 40);
+                }
+            }
+
+            // 地面
+            ctx.fillStyle = '#8B7355';
+            ctx.fillRect(0, target.y, width, height - target.y);
+
+            // ターゲット
+            ctx.fillStyle = '#4CAF50';
+            ctx.fillRect(target.x, target.y, target.width, target.height);
+
+            // ターゲット中心線
+            ctx.strokeStyle = '#FFD700';
+            ctx.lineWidth = 3;
+            ctx.beginPath();
+            ctx.moveTo(target.centerX, target.y);
+            ctx.lineTo(target.centerX, target.y + target.height);
+            ctx.stroke();
+
+            // プレイヤー
+            ctx.save();
+            ctx.translate(player.x + player.size/2 + player.shakeOffset, player.y + player.size/2);
+            if (gameState === 'jumping') {
+                ctx.rotate(player.rotation * Math.PI / 180);
+            }
+            ctx.font = `${player.size}px Arial`;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText('🏃', 0, 0);
+            ctx.restore();
+
+            // 角度バー
+            if (isChargingJump && gameState === 'ready') {
+                const barLength = 80;
+                const angle = (jumpAngle % 90) * (Math.PI / 180);
+                const startX = player.x + player.size/2;
+                const startY = player.y + player.size/2;
+
+                ctx.strokeStyle = '#FFD700';
+                ctx.lineWidth = 4;
+                ctx.beginPath();
+                ctx.moveTo(startX, startY);
+                ctx.lineTo(
+                    startX + Math.cos(-angle) * barLength,
+                    startY + Math.sin(-angle) * barLength
+                );
+                ctx.stroke();
+
+                // 角度表示
+                ctx.fillStyle = 'white';
+                ctx.font = '20px Arial';
+                ctx.textAlign = 'center';
+                ctx.fillText(`${Math.round(jumpAngle % 90)}°`, startX, startY - 50);
+            }
+        }
+
+        function gameLoop() {
+            update();
+            draw();
+            animationId = requestAnimationFrame(gameLoop);
+        }
+
+        function jump() {
+            if (gameState !== 'ready') return;
+
+            const angle = (jumpAngle % 90) * (Math.PI / 180);
+            const power = (player.speed + 8) * 1.25;
+
+            if (jumpAngle % 90 === 0 || angle > Math.PI / 2 * 0.95) {
+                // 90度（真上）でジャンプ
+                gameState = 'failed';
+                player.vy = -8;
+                player.vx = 0;
+                showMessage('真上に跳んだ！');
+            } else {
+                gameState = 'jumping';
+                player.vx = Math.cos(-angle) * power;
+                player.vy = Math.sin(-angle) * power;
+            }
+        }
+
+        function calculateScore() {
+            const distance = Math.abs(player.x + player.size/2 - target.centerX);
+            const maxDistance = target.width / 2;
+
+            if (distance <= maxDistance) {
+                const points = Math.round((1 - distance / maxDistance) * 1000);
+                score += points;
+                scoreEl.textContent = `スコア: ${score}`;
+
+                if (distance < 20) {
+                    showMessage('パーフェクト！ +' + points);
+                } else if (distance < maxDistance * 0.5) {
+                    showMessage('ナイス！ +' + points);
+                } else {
+                    showMessage('成功！ +' + points);
+                }
+            } else {
+                showMessage('目標を外れた...');
+            }
+
+            titleEl.style.display = 'none';
+            runBtn.textContent = 'もう一度';
+        }
+
+        function showMessage(text) {
+            messageEl.textContent = text;
+            titleEl.style.display = 'none';
+            setTimeout(() => {
+                if (gameState === 'failed') {
+                    runBtn.textContent = 'もう一度';
+                }
+            }, 1000);
+        }
+
+        // イベントリスナー
+        function toggleRun() {
+            if (gameState === 'ready' || gameState === 'running') {
+                isRunning = !isRunning;
+                if (isRunning) {
+                    gameState = 'running';
+                    titleEl.style.display = 'none';
+                }
+            } else if (gameState === 'landed' || gameState === 'failed') {
+                init();
+            }
+        }
+
+        function startJump() {
+            if (gameState === 'ready' || gameState === 'running') {
+                isChargingJump = true;
+                gameState = 'ready';
+            }
+        }
+
+        function stopJump() {
+            if (isChargingJump) {
+                isChargingJump = false;
+                jump();
+            }
+        }
+
+        runBtn.addEventListener('click', toggleRun);
+        runBtn.addEventListener('touchend', (e) => { e.preventDefault(); toggleRun(); });
+
+        jumpBtn.addEventListener('mousedown', startJump);
+        jumpBtn.addEventListener('mouseup', stopJump);
+        jumpBtn.addEventListener('mouseleave', () => { if (isChargingJump) stopJump(); });
+        jumpBtn.addEventListener('touchstart', (e) => { e.preventDefault(); startJump(); });
+        jumpBtn.addEventListener('touchend', (e) => { e.preventDefault(); stopJump(); });
+        jumpBtn.addEventListener('touchcancel', (e) => { e.preventDefault(); stopJump(); });
+
+        window.addEventListener('resize', resize);
+        resize();
+        gameLoop();
+    </script>
+</body>
+</html>
