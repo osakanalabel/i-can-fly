@@ -1044,7 +1044,6 @@ function drawMessages() {
   const cy = H * 0.38;
   const blink = Math.sin(game.time * 4) > -0.3;
   const dist = (game.zoneCenter - EDGE_X).toFixed(1);
-  const portraitPhone = IS_TOUCH && H > W;
 
   switch (game.state) {
     case S.IDLE:
@@ -1053,7 +1052,6 @@ function drawMessages() {
         { text: `着地ゾーンまで ${dist}m / 幅 ${game.zoneWidth.toFixed(1)}m`, size: sm, bold: false },
         { text: '' },
         { text: '連打で加速、崖の端で長押し → 離してジャンプ', size: sm, bold: false },
-        { text: portraitPhone ? "📱 横持ちがおすすめです" : "", size: sm, color: "#ffd166" },
         { text: blink ? (small ? 'タップでスタート' : 'SPACE / タップでスタート') : '', size: mid, color: '#ffe066' },
       ], cy - big);
       break;
