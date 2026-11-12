@@ -68,6 +68,26 @@ const CFG = {
   DEATH_ANIM_TIME: 1.6,    // 死亡演出にかかる秒数(この後リトライ可)
   DEMO_RUN_ACCEL: 6,       // お手本デモの助走加速度 [m/s^2]
   DEMO_PREFER_ANGLE: 30,   // お手本デモで優先する角度 [deg](複数解があるとき)
+  DEVIL_TRIGGER_HEIGHT: 8, // 踏み切り忘れでゾーンに落ちそうなとき、この高さ [m] で悪魔の手が来る
+  DEVIL_REACH_TIME: 0.35,  // 手が伸びてくる時間 [s]
+  DEVIL_GRAB_TIME: 0.2,    // つかむ時間 [s]
+  DEVIL_WINDUP_TIME: 0.35, // つかんでから振りかぶる時間 [s]
+  DEVIL_THROW_TIME: 1.6,   // 投げられてから地面に落ちるまで [s]
+  DEVIL_SWING_TIME: 0.12,  // 叩く手の振り抜き時間 [s]
+  DEVIL_SLAP_TIME: 0.45,   // 叩き落とされてから地面に落ちるまで [s]
+  DEVIL_RETRACT_TIME: 0.5, // 手が引っ込む時間 [s]
+  DEVIL_DROP_MARGIN: 2.5,  // ゾーンの端からどれだけ外へ落とすか [m]
+  ANGEL_BEAM_TIME: 0.5,    // お迎えの光が差すまで [s]
+  ANGEL_DESCEND_TIME: 0.9, // 天使が降りてくる時間 [s]
+  ANGEL_ASCEND_TIME: 1.8,  // 昇天する時間 [s]
+  MISSILE_LOCK_TIME: 0.45, // ロックオン表示の時間 [s]
+  MISSILE_FLY_TIME: 0.6,   // ミサイルの飛翔時間 [s]
+  MISSILE_BLAST_TIME: 1.0, // 吹き飛ばされてから地面に落ちるまで [s]
+  FLEE_NOTICE_TIME: 0.35,  // 着地ゾーンが立ち上がる時間 [s]
+  FLEE_RUN_TIME: 0.6,      // 着地ゾーンが逃げる時間 [s]
+  FLEE_MARGIN: 1.5,        // 予測着地点からどれだけ離れるまで逃げるか [m]
+  // 踏み切り忘れの介入の種類と出やすさ(0 にするとその演出は出ない)
+  DOOM_WEIGHTS: { throw: 1, slap: 1, angel: 1, missile: 1, flee: 1 },
   MAT_DENT_DEPTH: 0.45,    // 着地ゾーン(マット)が沈む最大深さ [m]
   MAT_DENT_WIDTH: 1.0,     // 沈みの広がり [m]
   MAT_DAMPING: 3.5,        // 沈み戻りの減衰(大きいほど早く収まる)
@@ -89,6 +109,13 @@ const DEATH_MESSAGES = [
   'I CAN\'T FLY',
   '助走の時間は人生の無駄',
 ];
+const DOOM_MESSAGES = {
+  throw:   ['悪魔「ズルはいけないよ」', '対岸までご案内', '踏み切らない者に着地なし', '見られていた'],
+  slap:    ['はたき落とされた', '悪魔「ハエかと思った」', 'ラッキーは許されない'],
+  angel:   ['お迎えが来ました', '着地より先に昇天', '天国は着地ゾーン外です'],
+  missile: ['撃墜確認', '空域侵犯', '飛べたのにね'],
+  flee:    ['着地点にも選ぶ権利がある', '逃げられた', 'マット「無理です」'],
+};
 const RANOFF_MESSAGES = [
   'ジャンプを忘れた',
   'ただの落下',
@@ -115,6 +142,7 @@ const S = {
   SUCCESS: 'success', // 着地成功、結果表示中
   DEAD: 'dead',       // 死亡演出 → デモ/リトライの選択待ち
   DEMO: 'demo',       // お手本デモ再生中
+  DEVIL: 'devil',     // 踏み切り忘れなのにゾーンに落ちそう → 悪魔の手が場外へ連れ去る
 };
 
 const game = {
@@ -148,6 +176,9 @@ const game = {
   menuSel: 1,           // 死亡後メニューの選択(0: デモ, 1: リトライ)
   demo: null,           // { phase, speed, angle, path, reachable }
   puffs: [],            // やわらか着地のふわっとした粒
+  devil: null,          // 踏み切り忘れの介入 { armed, kind, phase, t, ... }
+  fx: [],               // 爆炎・煙・火花・羽
+  shake: 0,             // 画面の揺れ [s]
   time: 0,
 };
 
@@ -217,6 +248,8 @@ function setupStage() {
   const distMin = Math.min(CFG.ZONE_DIST_MIN, distMax);
   game.zoneCenter = EDGE_X + distMin + Math.random() * Math.max(0, distMax - distMin);
   game.demo = null;
+  game.devil = null;
+  game.fx = []; game.shake = 0;
   game.menuSel = 1;
   game.x = 1.5; game.y = CLIFF_H; game.vx = 0; game.vy = 0;
   game.speed = 0; game.runPhase = 0;
@@ -277,6 +310,8 @@ function menuMove(dir) {
 
 /* ---- お手本デモ ---- */
 function startDemo() {
+  // 着地ゾーンが逃げていたら元の位置に戻してからお手本を解く
+  if (game.devil && game.devil.origCenter !== undefined) game.zoneCenter = game.devil.origCenter;
   const sol = solveJump(game.zoneCenter - EDGE_X, game.wind);
   const demo = { phase: 'run', reachable: !!sol, speed: 0, angle: CFG.ANGLE_MIN, path: [] };
   if (sol) {
@@ -295,6 +330,7 @@ function startDemo() {
   game.x = 1.5; game.y = CLIFF_H; game.vx = 0; game.vy = 0;
   game.speed = 0; game.runPhase = 0; game.charging = false; game.angle = CFG.ANGLE_MIN;
   game.ranOff = false; game.timer = 0;
+  game.devil = null;
   game.state = S.DEMO;
 }
 
@@ -381,6 +417,7 @@ function update(dt) {
         game.charging = false;
         game.vx = game.speed; game.vy = 0;
         game.state = S.AIR;
+        armDevilIfLuckyFall();
       }
       break;
     }
@@ -404,12 +441,19 @@ function update(dt) {
           game.x = EDGE_X; game.vx = 0;
         }
       }
+      if (game.devil && game.devil.armed && game.y <= CFG.DEVIL_TRIGGER_HEIGHT) {
+        startDevil();
+        break;
+      }
       if (game.y <= 0) {
         game.y = 0;
         land();
       }
       break;
     }
+    case S.DEVIL:
+      updateDevil(dt);
+      break;
     case S.SUCCESS:
       game.timer += dt;
       if (game.timer >= CFG.RESULT_WAIT) nextStage();
@@ -422,6 +466,7 @@ function update(dt) {
       break;
   }
   updatePuffs(dt);
+  updateFx(dt);
 }
 
 /* ---- やわらか着地 ---- */
@@ -489,6 +534,257 @@ function updateDemo(dt) {
   }
 }
 
+/* ---- 悪魔の介入 ----
+ * 踏み切り忘れで落ちたのに、たまたま着地ゾーンに入りそうなときだけ発動する。
+ * 種類はランダム(CFG.DOOM_WEIGHTS):
+ *   throw   悪魔の手がつかんで、着地ゾーンの対岸へ投げ捨てる
+ *   slap    悪魔の手が叩き落とす
+ *   angel   お迎え(天使)が来て、着地前に昇天させる
+ *   missile ミサイルで撃墜される
+ *   flee    着地ゾーンが足を生やして逃げる */
+const lerp = (a, b, k) => a + (b - a) * k;
+const easeOut = (t) => 1 - Math.pow(1 - t, 3);
+const easeInOut = (t) => t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+
+function predictLandingX(x, y, vx, vy) {
+  const dt = CFG.PHYSICS_STEP;
+  for (let i = 0; i < 20000 && y > 0; i++) {
+    vx += game.wind * CFG.WIND_ACCEL_FACTOR * dt; vy -= CFG.GRAVITY * dt;
+    x += vx * dt; y += vy * dt;
+  }
+  return x;
+}
+function pickDoomKind() {
+  const entries = Object.entries(CFG.DOOM_WEIGHTS).filter(([, w]) => w > 0);
+  const total = entries.reduce((s, [, w]) => s + w, 0);
+  let r = Math.random() * total;
+  for (const [k, w] of entries) { r -= w; if (r < 0) return k; }
+  return entries[0][0];
+}
+function armDevilIfLuckyFall() {
+  const lx = predictLandingX(game.x, game.y, game.vx, game.vy);
+  if (Math.abs(lx - game.zoneCenter) <= game.zoneWidth / 2 + 0.3) {
+    game.devil = { armed: true, kind: pickDoomKind(), predictedX: lx };
+  }
+}
+/* 着地ゾーンの外側の x。side: -1 = 崖側, +1 = 奥側。崖側に余地がなければ奥側 */
+function zoneOutsideX(side) {
+  const zL = game.zoneCenter - game.zoneWidth / 2, zR = game.zoneCenter + game.zoneWidth / 2;
+  let tx = side < 0 ? zL - CFG.DEVIL_DROP_MARGIN : zR + CFG.DEVIL_DROP_MARGIN;
+  if (tx < EDGE_X + 1) tx = zR + CFG.DEVIL_DROP_MARGIN;
+  if (tx > WORLD_W - 1) tx = Math.max(EDGE_X + 1, zL - CFG.DEVIL_DROP_MARGIN);
+  return tx;
+}
+/* 今の位置から T 秒後に (tx, 0) へ落ちる初速を与える(風なし) */
+function launchTo(tx, T) {
+  game.vx = (tx - game.x) / T;
+  game.vy = (-game.y + 0.5 * CFG.GRAVITY * T * T) / T;
+}
+function setupFlee(d) {
+  // 予測着地点から、ゾーンがマージン分外れる位置まで逃げる
+  const lx = predictLandingX(game.x, game.y, game.vx, game.vy);
+  const half = game.zoneWidth / 2, m = CFG.FLEE_MARGIN;
+  const fits = (c) => c - half >= EDGE_X + 0.5 && c + half <= WORLD_W - 0.5;
+  const away = lx <= game.zoneCenter ? lx + half + m : lx - half - m;
+  const other = lx <= game.zoneCenter ? lx - half - m : lx + half + m;
+  d.origCenter = game.zoneCenter;
+  d.fromC = game.zoneCenter;
+  d.toC = fits(away) ? away : other;
+  d.fleeDir = Math.sign(d.toC - d.fromC) || 1;
+  d.saveVx = game.vx; d.saveVy = game.vy;
+  d.lift = 0; d.legPhase = 0;
+}
+function startDevil() {
+  const d = game.devil;
+  const nearSide = game.x < game.zoneCenter ? -1 : 1;
+  Object.assign(d, {
+    armed: false, t: 0, grabX: game.x, grabY: game.y,
+    spin: 0, spinRate: 0, closed: 0, flash: 0, charred: false, halo: 0, retract: null,
+    originX: game.x + 4, originY: WORLD_H + 4, hx: game.x + 4, hy: WORLD_H + 4,
+  });
+  switch (d.kind) {
+    case 'throw':   d.targetX = zoneOutsideX(-nearSide); d.phase = 'reach'; break;  // 対岸へ
+    case 'slap':    d.targetX = zoneOutsideX(nearSide);  d.phase = 'reach'; break;
+    case 'missile': d.targetX = zoneOutsideX(nearSide);  d.phase = 'lock'; break;
+    case 'angel':   d.phase = 'beam'; d.beam = 0; d.angelY = WORLD_H + 3; break;
+    case 'flee':    setupFlee(d); d.phase = 'notice'; break;
+  }
+  d.dir = Math.sign((d.targetX ?? game.x + 1) - game.x) || 1;
+  if (d.kind === 'slap') { d.originX = game.x - d.dir * 6; d.hx = d.originX; }
+  if (d.kind === 'missile') {
+    d.srcX = d.dir > 0 ? -2 : WORLD_W + 2;
+    d.srcY = d.dir > 0 ? WORLD_H * 0.9 : game.y + 3;
+    d.mx = d.srcX; d.my = d.srcY; d.mang = 0;
+  }
+  if (d.kind !== 'flee') { game.vx = 0; game.vy = 0; }   // ヒットストップ
+  game.state = S.DEVIL;
+}
+function nextPhase(d, phase) { d.phase = phase; d.t = 0; }
+
+function updateDevil(dt) {
+  const d = game.devil;
+  d.t += dt;
+  d.flash = Math.max(0, d.flash - dt * 3);
+  if (d.kind === 'throw') updateThrow(d, dt);
+  else if (d.kind === 'slap') updateSlap(d, dt);
+  else if (d.kind === 'angel') updateAngel(d, dt);
+  else if (d.kind === 'missile') updateMissile(d, dt);
+  else if (d.kind === 'flee') updateFlee(d, dt);
+}
+
+/* 投げられた/叩かれた/吹き飛ばされた後の落下(風なし、回転しながら) */
+function updateFlung(d, dt) {
+  game.vy -= CFG.GRAVITY * dt;
+  game.x += game.vx * dt; game.y += game.vy * dt;
+  d.spin += d.spinRate * dt;
+  if (d.retract) {
+    const k = Math.min(1, d.t / CFG.DEVIL_RETRACT_TIME);
+    d.hx = lerp(d.retract.x, d.originX + 3, k * k);
+    d.hy = lerp(d.retract.y, WORLD_H + 6, k * k);
+    d.closed = Math.max(0, d.closed - dt * 8);
+  }
+  if (d.charred && Math.random() < 0.35) spawnFx('smoke', game.x, game.y + CFG.CHAR_HEIGHT * 0.9, 1);
+  if (game.y <= 0) { game.y = 0; d.spin = 0; land(); }
+}
+
+function updateThrow(d, dt) {
+  const CH = CFG.CHAR_HEIGHT;
+  if (d.phase === 'reach') {
+    const k = easeOut(Math.min(1, d.t / CFG.DEVIL_REACH_TIME));
+    d.hx = lerp(d.originX, d.grabX, k); d.hy = lerp(d.originY, d.grabY + CH * 0.6, k);
+    if (d.t >= CFG.DEVIL_REACH_TIME) nextPhase(d, 'grab');
+  } else if (d.phase === 'grab') {
+    d.closed = Math.min(1, d.t / CFG.DEVIL_GRAB_TIME);
+    if (d.t >= CFG.DEVIL_GRAB_TIME) nextPhase(d, 'windup');
+  } else if (d.phase === 'windup') {
+    // 投げる方向と逆へ引いて振りかぶる
+    const k = easeOut(Math.min(1, d.t / CFG.DEVIL_WINDUP_TIME));
+    game.x = Math.max(EDGE_X + 0.3, d.grabX - d.dir * 1.5 * k);
+    game.y = d.grabY + 1.2 * k;
+    d.spin = -d.dir * 0.5 * k;
+    d.hx = game.x; d.hy = game.y + CH * 0.6;
+    if (d.t >= CFG.DEVIL_WINDUP_TIME) {
+      launchTo(d.targetX, CFG.DEVIL_THROW_TIME);
+      d.spinRate = d.dir * 9;
+      d.retract = { x: d.hx, y: d.hy };
+      game.shake = 0.12;
+      nextPhase(d, 'flung');
+    }
+  } else updateFlung(d, dt);
+}
+
+function updateSlap(d, dt) {
+  const CH = CFG.CHAR_HEIGHT;
+  const bx = d.grabX - d.dir * 2.6, by = d.grabY + CH + 1.8;   // 振りかぶった位置
+  if (d.phase === 'reach') {
+    const k = easeOut(Math.min(1, d.t / CFG.DEVIL_REACH_TIME));
+    d.hx = lerp(d.originX, bx, k); d.hy = lerp(d.originY, by, k);
+    if (d.t >= CFG.DEVIL_REACH_TIME + 0.15) nextPhase(d, 'swing');   // 一瞬ためる
+  } else if (d.phase === 'swing') {
+    const k = Math.min(1, d.t / CFG.DEVIL_SWING_TIME);
+    d.hx = lerp(bx, d.grabX + d.dir * 1.2, k * k);
+    d.hy = lerp(by, d.grabY + CH * 0.3, k * k);
+    if (k >= 1) {
+      launchTo(d.targetX, CFG.DEVIL_SLAP_TIME);
+      d.spinRate = d.dir * 16; d.flash = 0.5; game.shake = 0.3;
+      spawnFx('spark', game.x, game.y + CH * 0.6, 12);
+      d.retract = { x: d.hx, y: d.hy };
+      nextPhase(d, 'flung');
+    }
+  } else updateFlung(d, dt);
+}
+
+function updateAngel(d, dt) {
+  const CH = CFG.CHAR_HEIGHT;
+  if (d.phase === 'beam') {
+    d.beam = Math.min(1, d.t / CFG.ANGEL_BEAM_TIME);
+    if (d.t >= CFG.ANGEL_BEAM_TIME) nextPhase(d, 'descend');
+  } else if (d.phase === 'descend') {
+    const k = easeOut(Math.min(1, d.t / CFG.ANGEL_DESCEND_TIME));
+    d.angelY = lerp(WORLD_H + 3, game.y + CH * 0.75, k);
+    if (d.t >= CFG.ANGEL_DESCEND_TIME) { d.halo = 1; nextPhase(d, 'ascend'); }
+  } else if (d.phase === 'ascend') {
+    const k = Math.min(1, d.t / CFG.ANGEL_ASCEND_TIME);
+    game.y = lerp(d.grabY, WORLD_H + 6, k * k);
+    d.angelY = game.y + CH * 0.75;
+    if (Math.random() < 0.25) spawnFx('feather', game.x + (Math.random() - 0.5) * 2.5, game.y + CH, 1);
+    if (k >= 1) { game.x = d.grabX; game.y = 0; land(); }
+  }
+}
+
+function missilePos(d, k) {
+  const tx = d.grabX, ty = d.grabY + CFG.CHAR_HEIGHT * 0.5;
+  const cx = (d.srcX + tx) / 2, cy = Math.max(d.srcY, ty) + 4;
+  const u = 1 - k;
+  return {
+    x: u * u * d.srcX + 2 * u * k * cx + k * k * tx,
+    y: u * u * d.srcY + 2 * u * k * cy + k * k * ty,
+    ang: Math.atan2(2 * u * (cy - d.srcY) + 2 * k * (ty - cy), 2 * u * (cx - d.srcX) + 2 * k * (tx - cx)),
+  };
+}
+function updateMissile(d, dt) {
+  const CH = CFG.CHAR_HEIGHT;
+  if (d.phase === 'lock') {
+    if (d.t >= CFG.MISSILE_LOCK_TIME) nextPhase(d, 'fly');
+  } else if (d.phase === 'fly') {
+    const k = Math.min(1, d.t / CFG.MISSILE_FLY_TIME);
+    const p = missilePos(d, k);
+    d.mx = p.x; d.my = p.y; d.mang = p.ang;
+    spawnFx('smoke', d.mx - Math.cos(p.ang) * 0.8, d.my - Math.sin(p.ang) * 0.8, 1);
+    if (k >= 1) {
+      spawnFx('fire', game.x, game.y + CH * 0.5, 28);
+      spawnFx('smoke', game.x, game.y + CH * 0.5, 14);
+      d.flash = 1; game.shake = 0.45; d.charred = true;
+      launchTo(d.targetX, CFG.MISSILE_BLAST_TIME);
+      d.spinRate = d.dir * 12;
+      nextPhase(d, 'flung');
+    }
+  } else updateFlung(d, dt);
+}
+
+function updateFlee(d, dt) {
+  if (d.phase === 'notice') {
+    d.lift = easeOut(Math.min(1, d.t / CFG.FLEE_NOTICE_TIME));
+    if (d.t >= CFG.FLEE_NOTICE_TIME) nextPhase(d, 'flee');
+  } else if (d.phase === 'flee') {
+    const k = easeInOut(Math.min(1, d.t / CFG.FLEE_RUN_TIME));
+    game.zoneCenter = lerp(d.fromC, d.toC, k);
+    d.legPhase += dt * 30;
+    if (d.t >= CFG.FLEE_RUN_TIME) { game.vx = d.saveVx; game.vy = d.saveVy; nextPhase(d, 'fall'); }
+  } else {
+    // 止まっていた時間が動き出し、何もない地面へ
+    game.vx += game.wind * CFG.WIND_ACCEL_FACTOR * dt;
+    game.vy -= CFG.GRAVITY * dt;
+    game.x += game.vx * dt; game.y += game.vy * dt;
+    d.legPhase += dt * 6;
+    if (game.y <= 0) { game.y = 0; land(); }
+  }
+}
+
+/* ---- 演出用パーティクル(爆炎・煙・火花・羽) ---- */
+function spawnFx(kind, x, y, n) {
+  for (let i = 0; i < n; i++) {
+    const a = Math.random() * Math.PI * 2;
+    const p = { kind, x, y, vx: 0, vy: 0, r: 0.2, life: 1, age: 0, grav: 0, rot: Math.random() * 6 };
+    if (kind === 'fire') { const sp = 2 + Math.random() * 5; p.vx = Math.cos(a) * sp; p.vy = Math.sin(a) * sp; p.r = 0.3 + Math.random() * 0.4; p.life = 0.4 + Math.random() * 0.4; p.grav = -1.5; }
+    else if (kind === 'smoke') { const sp = Math.random() * 0.8; p.vx = Math.cos(a) * sp; p.vy = Math.sin(a) * sp; p.r = 0.25 + Math.random() * 0.3; p.life = 0.8 + Math.random() * 0.8; p.grav = -0.8; }
+    else if (kind === 'spark') { const sp = 4 + Math.random() * 4; p.vx = Math.cos(a) * sp; p.vy = Math.sin(a) * sp; p.r = 0.14; p.life = 0.35; }
+    else if (kind === 'feather') { p.vx = (Math.random() - 0.5) * 0.6; p.vy = -0.4; p.r = 0.2; p.life = 1.8; }
+    game.fx.push(p);
+  }
+}
+function updateFx(dt) {
+  for (const p of game.fx) {
+    p.age += dt;
+    const drag = 1 - 2.5 * dt;
+    p.vx *= drag; p.vy = p.vy * drag - p.grav * dt;
+    if (p.kind === 'feather') p.x += Math.sin(p.age * 4 + p.rot) * 0.02;
+    p.x += p.vx * dt; p.y += p.vy * dt;
+  }
+  game.fx = game.fx.filter(p => p.age < p.life);
+  game.shake = Math.max(0, game.shake - dt);
+}
+
 function land() {
   game.landX = game.x;
   game.timer = 0;
@@ -504,7 +800,7 @@ function land() {
     spawnPuffs(game.x);
     game.state = S.SUCCESS;
   } else {
-    const pool = game.ranOff ? RANOFF_MESSAGES : DEATH_MESSAGES;
+    const pool = (game.devil && !game.devil.armed) ? DOOM_MESSAGES[game.devil.kind] : game.ranOff ? RANOFF_MESSAGES : DEATH_MESSAGES;
     game.deathMsg = pool[Math.floor(Math.random() * pool.length)];
     game.deathX = game.x;
     game.menuSel = 1;
@@ -540,11 +836,20 @@ const sx = (x) => originX + x * scale;
 const sy = (y) => groundY - y * scale;
 
 function render() {
+  ctx.save();
+  if (game.shake > 0) {
+    const m = game.shake * 30;
+    ctx.translate((Math.random() - 0.5) * m, (Math.random() - 0.5) * m);
+  }
   drawSky();
   drawGround();
   drawCliff();
+  drawDevilBack();
   drawCharacter();
+  drawDevil();
+  drawFx();
   drawSoftLanding();
+  ctx.restore();
   drawHUD();
   drawMessages();
 }
@@ -584,6 +889,12 @@ function drawGround() {
     ctx.beginPath(); ctx.moveTo(px, gy); ctx.lineTo(px + 4, gy - 4); ctx.lineTo(px + 8, gy); ctx.fill();
   }
   // 着地ゾーン = ふかふかのマット。着地すると沈んで戻る
+  // 逃げる演出中は足を生やして持ち上がる
+  const fl = (game.devil && game.devil.kind === 'flee' && game.devil.phase) ? game.devil : null;
+  const legLen = CFG.CHAR_HEIGHT * scale * 0.45;
+  const lift = fl ? fl.lift * (Math.max(12, scale * 1.0) + 3 + legLen) : 0;
+  ctx.save();
+  ctx.translate(0, -lift);
   const zL = game.zoneCenter - game.zoneWidth / 2, zR = game.zoneCenter + game.zoneWidth / 2;
   const zl = sx(zL), zw = game.zoneWidth * scale;
   const matH = Math.max(12, scale * 1.0);           // マットの厚み(px)
@@ -652,6 +963,9 @@ function drawGround() {
   ctx.font = `${Math.max(10, Math.min(13, scale * 1.1))}px sans-serif`;
   ctx.textAlign = 'center'; ctx.textBaseline = 'top';
   ctx.fillText(`${game.zoneWidth.toFixed(1)}m`, cx, gy + matH + 3);
+  if (fl) drawMatFace(fl, zl, zw, matTop, matH);
+  ctx.restore();
+  if (fl) drawMatLegs(fl, zl, zw, gy + matH - lift, gy);
 }
 
 /* やわらか着地の粒(文字は出さず、見た目だけでふんわり感を出す) */
@@ -702,6 +1016,7 @@ function drawCharacter() {
   const isDemo = st === S.DEMO;
   if (st === S.RUN) pose = game.charging ? 'crouch' : (game.speed > 0.2 ? 'run' : 'stand');
   else if (st === S.AIR) pose = game.ranOff ? 'flail' : (game.vy > 0 ? 'jump' : 'flail');
+  else if (st === S.DEVIL) pose = (game.devil && game.devil.kind === 'angel' && game.devil.phase === 'ascend') ? 'stand' : 'flail';
   else if (st === S.SUCCESS) pose = game.timer < 0.35 ? 'land' : 'cheer';
   else if (st === S.DEAD) { pose = 'dead'; sink = Math.min(1, game.timer / 0.6); }
   else if (isDemo) {
@@ -719,6 +1034,15 @@ function drawCharacter() {
   ctx.lineCap = 'round'; ctx.lineJoin = 'round';
   const col = isDemo ? '#1e5bd6' : '#111';   // デモのお手本は青いゴースト
   ctx.strokeStyle = col; ctx.fillStyle = col; ctx.lineWidth = lw;
+
+  if (st === S.DEAD && game.devil && game.devil.kind === 'angel') {
+    // 昇天したので体は残らない。墓石だけ生えて、上に天使の輪
+    const tRise = Math.min(1, game.timer / 0.7);
+    drawTombstone(fx, sy(0), h, tRise);
+    if (tRise >= 1) drawHalo(fx, sy(0) - h * 1.45, h * 0.3);
+    ctx.restore();
+    return;
+  }
 
   if (pose === 'dead') {
     // 地面にめり込む(頭から)
@@ -816,7 +1140,11 @@ function drawCharacter() {
       arms = [[-0.15, -0.55, -0.18, -0.35], [0.15, -0.55, 0.18, -0.35]];
   }
 
-  ctx.translate(fx, fy);
+  // 投げ飛ばされたときは体の中心で回転する
+  const spin = (st === S.DEVIL && game.devil) ? game.devil.spin : 0;
+  ctx.translate(fx, fy - h * 0.45);
+  ctx.rotate(spin);
+  ctx.translate(0, h * 0.45);
   ctx.rotate(lean);
   const P = (px, py) => [px * h, py * h];
   // 脚:腰 → 膝 → 足
@@ -833,6 +1161,16 @@ function drawCharacter() {
   }
   // 頭
   ctx.beginPath(); ctx.arc(0, headY + squat, headR, 0, Math.PI * 2); ctx.fill();
+  const dv = st === S.DEVIL ? game.devil : null;
+  if (dv && dv.charred) {
+    // 爆発でアフロになる
+    ctx.fillStyle = '#1a1a1a';
+    for (let i = 0; i < 9; i++) {
+      const a = Math.PI + (i / 8) * Math.PI;
+      ctx.beginPath(); ctx.arc(Math.cos(a) * headR * 1.05, headY + squat + Math.sin(a) * headR * 1.05, headR * 0.7, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+  if (dv && dv.halo) drawHalo(0, headY + squat - headR * 1.7, headR * 1.1);
   ctx.restore();
 
   // 角度ゲージ(溜め中)
@@ -901,6 +1239,278 @@ function roundRect(x, y, w, h, r) {
   ctx.arcTo(x, y + h, x, y, r);
   ctx.arcTo(x, y, x + w, y, r);
   ctx.closePath();
+}
+
+/* ---- 悪魔の介入の描画 ---- */
+/* キャラクターより奥に描くもの(お迎えの光) */
+function drawDevilBack() {
+  if (game.state !== S.DEVIL || !game.devil || game.devil.kind !== 'angel') return;
+  const d = game.devil, h = CFG.CHAR_HEIGHT * scale;
+  const b = d.phase === 'beam' ? d.beam : 1;
+  const x = sx(game.x), bottom = sy(0);
+  const g = ctx.createLinearGradient(0, 0, 0, bottom);
+  g.addColorStop(0, `rgba(255,244,190,${0.75 * b})`);
+  g.addColorStop(1, `rgba(255,244,190,${0.12 * b})`);
+  ctx.save();
+  ctx.fillStyle = g;
+  ctx.beginPath();
+  ctx.moveTo(x - h * 0.7, 0); ctx.lineTo(x + h * 0.7, 0);
+  ctx.lineTo(x + h * 1.6, bottom); ctx.lineTo(x - h * 1.6, bottom);
+  ctx.closePath(); ctx.fill();
+  ctx.restore();
+}
+
+/* キャラクターより手前に描くもの */
+function drawDevil() {
+  if (game.state !== S.DEVIL || !game.devil) return;
+  const d = game.devil, h = CFG.CHAR_HEIGHT * scale;
+  if (d.kind === 'throw' || d.kind === 'slap') {
+    let a = 1;
+    if (d.phase === 'reach') a = Math.min(1, d.t / CFG.DEVIL_REACH_TIME);
+    else if (d.phase === 'flung') a = Math.max(0, 1 - d.t / CFG.DEVIL_RETRACT_TIME);
+    drawDemonHand(d, a);
+  } else if (d.kind === 'angel') {
+    if (d.phase !== 'beam') {
+      const flap = Math.sin(game.time * 14);
+      drawAngel(sx(game.x - 0.9), sy(d.angelY), h * 0.8, flap, 1);
+      drawAngel(sx(game.x + 0.9), sy(d.angelY), h * 0.8, -flap, -1);
+    }
+  } else if (d.kind === 'missile') {
+    if (d.phase === 'lock' || d.phase === 'fly') drawReticle(d, h);
+    if (d.phase === 'fly') drawMissile(d);
+  }
+  if (d.flash > 0) {
+    ctx.save();
+    ctx.fillStyle = `rgba(255,250,235,${Math.min(0.8, d.flash * 0.8)})`;
+    ctx.fillRect(-60, -60, W + 120, H + 120);
+    ctx.restore();
+  }
+}
+
+function drawDemonHand(d, a) {
+  const h = CFG.CHAR_HEIGHT * scale;
+  ctx.save();
+  // 画面の縁を暗い紫に
+  const vg = ctx.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.3, W / 2, H / 2, Math.max(W, H) * 0.75);
+  vg.addColorStop(0, 'rgba(40,0,30,0)');
+  vg.addColorStop(1, `rgba(40,0,30,${0.55 * a})`);
+  ctx.fillStyle = vg;
+  ctx.fillRect(-60, -60, W + 120, H + 120);
+
+  // 画面上端の裂け目と赤い目
+  const ox = Math.min(W - 30, Math.max(30, sx(d.originX)));
+  const rg = ctx.createRadialGradient(ox, 0, 0, ox, 0, h * 2.6);
+  rg.addColorStop(0, `rgba(10,0,15,${0.95 * a})`);
+  rg.addColorStop(0.6, `rgba(50,5,45,${0.7 * a})`);
+  rg.addColorStop(1, 'rgba(50,5,45,0)');
+  ctx.fillStyle = rg;
+  ctx.beginPath(); ctx.ellipse(ox, 0, h * 2.6, h * 1.2, 0, 0, Math.PI * 2); ctx.fill();
+  const blinkOpen = (Math.sin(game.time * 5) > -0.9) ? 1 : 0.15;
+  ctx.fillStyle = `rgba(255,40,40,${a})`;
+  ctx.shadowColor = 'rgba(255,0,0,0.9)'; ctx.shadowBlur = 10;
+  for (const sgn of [-1, 1]) {
+    ctx.beginPath();
+    ctx.ellipse(ox + sgn * h * 0.45, h * 0.45, h * 0.16, h * 0.06 * blinkOpen, sgn * 0.25, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.shadowBlur = 0;
+
+  // 腕(裂け目から手まで、少しうねらせる)
+  const px = sx(d.hx), py = sy(d.hy);
+  const sx0 = ox, sy0 = -h * 0.5;
+  let dx = px - sx0, dy = py - sy0;
+  const len = Math.max(1, Math.hypot(dx, dy));
+  dx /= len; dy /= len;
+  const nx = -dy, ny = dx;
+  const wristX = px - dx * h * 0.3, wristY = py - dy * h * 0.3;
+  const cpx = (sx0 + wristX) / 2 + nx * len * 0.12, cpy = (sy0 + wristY) / 2 + ny * len * 0.12;
+  ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  ctx.globalAlpha = Math.max(0.15, a);
+  ctx.shadowColor = 'rgba(255,30,60,0.55)'; ctx.shadowBlur = 14;
+  ctx.strokeStyle = '#12051a'; ctx.lineWidth = h * 0.5;
+  ctx.beginPath(); ctx.moveTo(sx0, sy0); ctx.quadraticCurveTo(cpx, cpy, wristX, wristY); ctx.stroke();
+  ctx.shadowBlur = 0;
+  ctx.strokeStyle = '#3a1550'; ctx.lineWidth = h * 0.38;
+  ctx.beginPath(); ctx.moveTo(sx0, sy0); ctx.quadraticCurveTo(cpx, cpy, wristX, wristY); ctx.stroke();
+
+  // 手(ローカル座標:+y が指先の方向)
+  ctx.translate(px, py);
+  ctx.rotate(Math.atan2(dy, dx) - Math.PI / 2);
+  const rx = h * 0.3, ry = h * 0.26, c = d.closed;
+  ctx.fillStyle = '#3a1550'; ctx.strokeStyle = '#12051a'; ctx.lineWidth = Math.max(1.5, h * 0.05);
+  ctx.beginPath(); ctx.ellipse(0, 0, rx, ry, 0, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+
+  const finger = (bx, by, th1, curl, L) => {
+    const j1x = bx + Math.sin(th1) * L, j1y = by + Math.cos(th1) * L;
+    const th2 = th1 + curl;
+    const tx = j1x + Math.sin(th2) * L * 0.9, ty = j1y + Math.cos(th2) * L * 0.9;
+    ctx.strokeStyle = '#12051a'; ctx.lineWidth = h * 0.13;
+    ctx.beginPath(); ctx.moveTo(bx, by); ctx.lineTo(j1x, j1y); ctx.lineTo(tx, ty); ctx.stroke();
+    ctx.strokeStyle = '#3a1550'; ctx.lineWidth = h * 0.08;
+    ctx.beginPath(); ctx.moveTo(bx, by); ctx.lineTo(j1x, j1y); ctx.lineTo(tx, ty); ctx.stroke();
+    // 爪
+    const cl = L * 0.55, dirx = Math.sin(th2), diry = Math.cos(th2);
+    ctx.fillStyle = '#efe4cf';
+    ctx.beginPath();
+    ctx.moveTo(tx + dirx * cl, ty + diry * cl);
+    ctx.lineTo(tx - diry * h * 0.045, ty + dirx * h * 0.045);
+    ctx.lineTo(tx + diry * h * 0.045, ty - dirx * h * 0.045);
+    ctx.closePath(); ctx.fill();
+  };
+  const L = h * 0.2;
+  for (const fa of [-0.6, -0.2, 0.2, 0.6]) {
+    const bx = Math.sin(fa) * rx * 0.85, by = Math.cos(fa) * ry * 0.85;
+    const th1 = fa * (1.7 - 0.9 * c);                 // 開くと扇状、閉じるとすぼまる
+    const curl = (fa < 0 ? 1 : -1) * c * 2.1;         // 閉じると内側へ曲がって棒人間を囲う
+    finger(bx, by, th1, curl, L);
+  }
+  finger(-rx * 0.9, -ry * 0.1, -1.4 + c * 0.6, c * 1.6, L * 0.85);   // 親指
+  ctx.restore();
+}
+
+/* 天使(白い棒人間 + 羽 + 輪)。x, y は足元の画面座標、side は抱える向き */
+function drawAngel(x, y, h, flap, side) {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  // 羽
+  ctx.fillStyle = 'rgba(255,255,255,0.95)'; ctx.strokeStyle = '#b9bccb'; ctx.lineWidth = 1;
+  for (const s of [-1, 1]) {
+    ctx.save();
+    ctx.translate(s * h * 0.06, -h * 0.68);
+    ctx.rotate(s * (0.35 + flap * 0.45));
+    ctx.beginPath(); ctx.ellipse(s * h * 0.24, 0, h * 0.26, h * 0.1, 0, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+    ctx.restore();
+  }
+  // 体(灰色の縁取り + 白)
+  const lw = Math.max(1.5, h * 0.08);
+  const body = () => {
+    ctx.beginPath();
+    ctx.moveTo(0, -h * 0.45); ctx.lineTo(0, -h * 0.78);
+    ctx.moveTo(0, -h * 0.45); ctx.lineTo(-h * 0.1, 0);
+    ctx.moveTo(0, -h * 0.45); ctx.lineTo(h * 0.1, 0);
+    ctx.moveTo(0, -h * 0.74); ctx.lineTo(-side * h * 0.35, -h * 0.5);   // 棒人間を抱える腕
+    ctx.moveTo(0, -h * 0.74); ctx.lineTo(side * h * 0.15, -h * 0.95);
+    ctx.stroke();
+  };
+  ctx.strokeStyle = '#8f93a6'; ctx.lineWidth = lw + 2; body();
+  ctx.strokeStyle = '#ffffff'; ctx.lineWidth = lw; body();
+  ctx.fillStyle = '#ffffff'; ctx.strokeStyle = '#8f93a6'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.arc(0, -h * 0.9, h * 0.12, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+  drawHalo(0, -h * 1.12, h * 0.13);
+  ctx.restore();
+}
+
+function drawHalo(x, y, r) {
+  ctx.save();
+  ctx.strokeStyle = '#ffd34d'; ctx.lineWidth = Math.max(2, r * 0.35);
+  ctx.shadowColor = 'rgba(255,220,90,0.9)'; ctx.shadowBlur = 8;
+  ctx.beginPath(); ctx.ellipse(x, y, r, r * 0.32, 0, 0, Math.PI * 2); ctx.stroke();
+  ctx.restore();
+}
+
+function drawReticle(d, h) {
+  const X = sx(game.x), Y = sy(game.y + CFG.CHAR_HEIGHT * 0.5);
+  const shrink = d.phase === 'lock' ? 1 - Math.min(1, d.t / CFG.MISSILE_LOCK_TIME) : 0;
+  const R = h * (0.8 + shrink * 0.8);
+  if (d.phase === 'lock' && Math.floor(game.time * 14) % 2 === 1) return;   // 点滅
+  ctx.save();
+  ctx.translate(X, Y);
+  ctx.rotate(shrink * 2);
+  ctx.strokeStyle = 'rgba(255,40,40,0.95)'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(0, 0, R, 0, Math.PI * 2); ctx.stroke();
+  ctx.beginPath(); ctx.arc(0, 0, R * 0.45, 0, Math.PI * 2); ctx.stroke();
+  for (let i = 0; i < 4; i++) {
+    const a = i * Math.PI / 2;
+    ctx.beginPath();
+    ctx.moveTo(Math.cos(a) * R * 0.6, Math.sin(a) * R * 0.6);
+    ctx.lineTo(Math.cos(a) * R * 1.35, Math.sin(a) * R * 1.35);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function drawMissile(d) {
+  const L = Math.max(18, scale * 1.6), Wd = Math.max(5, scale * 0.36);
+  ctx.save();
+  ctx.translate(sx(d.mx), sy(d.my));
+  ctx.rotate(-d.mang);
+  // 噴射炎
+  const fl = L * (0.4 + Math.random() * 0.3);
+  ctx.fillStyle = '#ffb02e';
+  ctx.beginPath(); ctx.moveTo(-L * 0.5, -Wd * 0.4); ctx.lineTo(-L * 0.5 - fl, 0); ctx.lineTo(-L * 0.5, Wd * 0.4); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = '#fff3a8';
+  ctx.beginPath(); ctx.moveTo(-L * 0.5, -Wd * 0.2); ctx.lineTo(-L * 0.5 - fl * 0.5, 0); ctx.lineTo(-L * 0.5, Wd * 0.2); ctx.closePath(); ctx.fill();
+  // 尾翼
+  ctx.fillStyle = '#4a4f57';
+  ctx.beginPath(); ctx.moveTo(-L * 0.5, -Wd * 0.5); ctx.lineTo(-L * 0.6, -Wd * 1.1); ctx.lineTo(-L * 0.25, -Wd * 0.5); ctx.closePath(); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(-L * 0.5, Wd * 0.5); ctx.lineTo(-L * 0.6, Wd * 1.1); ctx.lineTo(-L * 0.25, Wd * 0.5); ctx.closePath(); ctx.fill();
+  // 胴体と弾頭
+  ctx.fillStyle = '#dfe3e8'; ctx.strokeStyle = '#555'; ctx.lineWidth = 1;
+  roundRect(-L * 0.5, -Wd * 0.5, L * 0.8, Wd, Wd * 0.3); ctx.fill(); ctx.stroke();
+  ctx.fillStyle = '#e03131';
+  ctx.beginPath(); ctx.moveTo(L * 0.3, -Wd * 0.5); ctx.lineTo(L * 0.5, 0); ctx.lineTo(L * 0.3, Wd * 0.5); ctx.closePath(); ctx.fill();
+  ctx.restore();
+}
+
+/* 逃げる着地ゾーンの目と足 */
+function drawMatFace(fl, zl, zw, matTop, matH) {
+  const r = Math.max(3, matH * 0.28) * (0.6 + 0.4 * fl.lift);
+  const ex = fl.fleeDir > 0 ? zl + zw - r * 3.2 : zl + r * 3.2;
+  const ey = matTop + matH * 0.5;
+  for (const o of [-1, 1]) {
+    const x = ex + o * r * 1.25;
+    ctx.fillStyle = '#ffffff'; ctx.strokeStyle = '#1f5c28'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.arc(x, ey, r, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = '#111';
+    // 立ち上がった瞬間は上(落ちてくる棒人間)を見て、逃げ出したら進行方向を見る
+    const look = fl.phase === 'notice' ? [0, -r * 0.45] : [fl.fleeDir * r * 0.45, 0];
+    ctx.beginPath(); ctx.arc(x + look[0], ey + look[1], r * 0.45, 0, Math.PI * 2); ctx.fill();
+  }
+}
+function drawMatLegs(fl, zl, zw, top, bottom) {
+  const h = CFG.CHAR_HEIGHT * scale;
+  const n = Math.max(2, Math.min(6, Math.round(zw / Math.max(12, scale * 1.5))));
+  const len = bottom - top;
+  const running = fl.phase === 'flee';
+  ctx.save();
+  ctx.strokeStyle = '#2f8f3c'; ctx.lineWidth = Math.max(2, h * 0.07); ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  for (let i = 0; i < n; i++) {
+    const x = zl + zw * (i + 0.5) / n;
+    const sw = Math.sin(fl.legPhase + i * Math.PI) * len * (running ? 0.6 : 0.15);
+    ctx.beginPath();
+    ctx.moveTo(x, top);
+    ctx.lineTo(x + sw * 0.4, top + len * 0.55);
+    ctx.lineTo(x + sw, bottom);
+    ctx.lineTo(x + sw + fl.fleeDir * len * 0.2, bottom);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function drawFx() {
+  for (const p of game.fx) {
+    const k = p.age / p.life;
+    const X = sx(p.x), Y = sy(p.y), R = p.r * scale;
+    if (p.kind === 'fire') {
+      ctx.fillStyle = `hsla(${50 - 45 * k}, 100%, ${62 - 25 * k}%, ${1 - k})`;
+      ctx.beginPath(); ctx.arc(X, Y, R * (1 + k), 0, Math.PI * 2); ctx.fill();
+    } else if (p.kind === 'smoke') {
+      ctx.fillStyle = `rgba(70,70,75,${0.45 * (1 - k)})`;
+      ctx.beginPath(); ctx.arc(X, Y, R * (1 + 1.5 * k), 0, Math.PI * 2); ctx.fill();
+    } else if (p.kind === 'spark') {
+      const s = R * 2.5 * (1 - k) + 2;
+      ctx.strokeStyle = `rgba(255,225,74,${1 - k})`; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(X - s, Y); ctx.lineTo(X + s, Y); ctx.moveTo(X, Y - s); ctx.lineTo(X, Y + s); ctx.stroke();
+    } else if (p.kind === 'feather') {
+      ctx.save();
+      ctx.globalAlpha = 1 - k;
+      ctx.translate(X, Y); ctx.rotate(Math.sin(p.age * 3 + p.rot) * 0.7);
+      ctx.fillStyle = '#ffffff'; ctx.strokeStyle = '#b9bccb'; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.ellipse(0, 0, R * 1.6, R * 0.5, 0, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+      ctx.restore();
+    }
+  }
 }
 
 function drawTombstone(x, gy, h, t) {
