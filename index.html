@@ -1,0 +1,1176 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<title>I CAN FLY</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #0b1020; touch-action: none; overscroll-behavior: none; }
+  body { font-family: system-ui, -apple-system, "Segoe UI", "Hiragino Sans", "Noto Sans JP", sans-serif; user-select: none; -webkit-user-select: none; }
+  #game { display: block; width: 100%; height: 100%; touch-action: none; }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<script>
+'use strict';
+
+/* =========================================================================
+ *  パラメータ(ゲームバランスはここで調整する)
+ *  長さの単位はすべてメートル、時間は秒。
+ * ========================================================================= */
+const CFG = {
+  // --- 物理・サイズ -------------------------------------------------------
+  GRAVITY: 9.8,            // 重力加速度 [m/s^2]
+  CHAR_HEIGHT: 1.8,        // キャラクター身長 [m]
+  CLIFF_HEIGHT_RATIO: 10,  // 崖の高さ = 身長 × この値
+  CLIFF_WIDTH: 16,         // 崖(助走路)の長さ [m](スタートラインは x=1.5)
+
+  // --- 助走 ---------------------------------------------------------------
+  TAP_ACCEL: 1.4,          // 連打 1 回あたりの加速量 [m/s]
+  RUN_DECEL: 2.2,          // 自然減速 [m/s^2]
+  MAX_SPEED: 12,           // 最大速度 [m/s]
+
+  // --- ジャンプ -----------------------------------------------------------
+  JUMP_SPEED_FACTOR: 1.3,  // 初速 = 助走速度 × この値
+  ANGLE_MIN: 10,           // 最小角度 [deg](押した瞬間に離した場合)
+  ANGLE_MAX: 60,           // 最大角度 [deg]
+  ANGLE_PER_SEC: 50,       // 押下 1 秒あたり増える角度 [deg/s]
+  HOLD_THRESHOLD: 0.12,    // これ未満の押下は「連打」、以上なら「ジャンプ溜め」扱い [s]
+
+  // --- 踏み切り位置ペナルティ ---------------------------------------------
+  TAKEOFF_PENALTY_PER_M: 0.10, // 崖の端から 1m 手前ごとに初速が減る割合
+  TAKEOFF_MIN_FACTOR: 0.3,     // 初速係数の下限
+
+  // --- 風 -----------------------------------------------------------------
+  WIND_MAX_START: 1.5,     // ステージ 1 の風速の振れ幅 [m/s](±この範囲でランダム)
+  WIND_MAX_GROWTH: 0.7,    // ステージが 1 進むごとに振れ幅が増える量 [m/s]
+  WIND_MAX: 6,             // 振れ幅の上限 [m/s]
+  WIND_ACCEL_FACTOR: 0.3,  // 空中の水平加速度 = 風速 × この値 [m/s^2]
+
+  // --- 難易度 -------------------------------------------------------------
+  ZONE_WIDTH_START: 8,     // ステージ 1 の着地ゾーン幅 [m]
+  ZONE_WIDTH_SHRINK: 0.85, // ステージごとの縮小率
+  ZONE_WIDTH_MIN: 1.2,     // 着地ゾーン幅の下限 [m]
+  ZONE_DIST_MIN: 12,       // 崖の端から着地ゾーン中心までの最小距離 [m]
+  ZONE_DIST_MAX: 32,       // 同 最大距離 [m]
+  WORLD_MARGIN_RIGHT: 6,   // 画面右側の余白 [m]
+
+  // --- スコア -------------------------------------------------------------
+  SCORE_MAX: 100,          // ゾーン中心で得られる点数
+  SCORE_MIN: 10,           // ゾーン端で得られる点数
+  PERFECT_SCORE: 90,       // この点数以上で PERFECT!
+  GREAT_SCORE: 70,         // この点数以上で GREAT!
+
+  // --- 演出 ---------------------------------------------------------------
+  RESULT_WAIT: 2.0,        // 成功表示から次ステージまでの秒数
+  DEATH_ANIM_TIME: 1.6,    // 死亡演出にかかる秒数(この後リトライ可)
+  DEMO_RUN_ACCEL: 6,       // お手本デモの助走加速度 [m/s^2]
+  DEMO_PREFER_ANGLE: 30,   // お手本デモで優先する角度 [deg](複数解があるとき)
+  MAT_DENT_DEPTH: 0.45,    // 着地ゾーン(マット)が沈む最大深さ [m]
+  MAT_DENT_WIDTH: 1.0,     // 沈みの広がり [m]
+  MAT_DAMPING: 3.5,        // 沈み戻りの減衰(大きいほど早く収まる)
+  MAT_BOUNCE_FREQ: 9,      // 沈み戻りの揺れ [rad/s]
+
+  PHYSICS_STEP: 1 / 120,   // 固定タイムステップ [s]
+  HIGHSCORE_KEY: 'icanfly_highscore',
+};
+
+const DEATH_MESSAGES = [
+  '風のせいにするな',
+  '飛べると思った？',
+  '着地ゾーンは目の前だった',
+  '翼はついていません',
+  '次は靴を履こう',
+  '重力は今日も元気です',
+  '地面「よう、久しぶり」',
+  '練習は裏切る',
+  'I CAN\'T FLY',
+  '助走の時間は人生の無駄',
+];
+const RANOFF_MESSAGES = [
+  'ジャンプを忘れた',
+  'ただの落下',
+  '踏み切りボタンは飾り',
+];
+
+/* =========================================================================
+ *  派生定数
+ * ========================================================================= */
+const CLIFF_H = CFG.CHAR_HEIGHT * CFG.CLIFF_HEIGHT_RATIO;
+const EDGE_X = CFG.CLIFF_WIDTH;                 // 崖の端の x 座標
+const WORLD_W = EDGE_X + CFG.ZONE_DIST_MAX + CFG.ZONE_WIDTH_START / 2 + CFG.WORLD_MARGIN_RIGHT;
+// 最大ジャンプの頂点高さを見積もって世界の高さを決める
+const _vMax = CFG.MAX_SPEED * CFG.JUMP_SPEED_FACTOR * Math.sin(CFG.ANGLE_MAX * Math.PI / 180);
+const WORLD_H = CLIFF_H + (_vMax * _vMax) / (2 * CFG.GRAVITY) + CFG.CHAR_HEIGHT * 2.5;
+
+/* =========================================================================
+ *  状態
+ * ========================================================================= */
+const S = {
+  IDLE: 'idle',       // スタート待機
+  RUN: 'run',         // 助走中(押下中の溜めも含む)
+  AIR: 'air',         // 空中
+  SUCCESS: 'success', // 着地成功、結果表示中
+  DEAD: 'dead',       // 死亡演出 → デモ/リトライの選択待ち
+  DEMO: 'demo',       // お手本デモ再生中
+};
+
+const game = {
+  state: S.IDLE,
+  stage: 1,
+  totalScore: 0,
+  highScore: 0,
+  wind: 0,              // 風速 [m/s](正: 右向き)
+  zoneCenter: 0,        // 着地ゾーン中心 x
+  zoneWidth: 0,
+  // キャラクター
+  x: 1.5, y: CLIFF_H, vx: 0, vy: 0,
+  speed: 0,             // 助走速度
+  runPhase: 0,          // 走りアニメの位相
+  // 入力
+  pressed: false,
+  pressTime: 0,         // 押下継続時間
+  charging: false,      // 角度ゲージを溜めているか
+  angle: CFG.ANGLE_MIN,
+  // 踏み切り情報(表示用)
+  takeoffDist: 0,
+  takeoffFactor: 1,
+  ranOff: false,
+  // 結果
+  lastScore: 0,
+  lastRank: '',
+  landX: 0,
+  timer: 0,
+  deathMsg: '',
+  deathX: 0,            // 墓石の位置
+  menuSel: 1,           // 死亡後メニューの選択(0: デモ, 1: リトライ)
+  demo: null,           // { phase, speed, angle, path, reachable }
+  puffs: [],            // やわらか着地のふわっとした粒
+  time: 0,
+};
+
+/* =========================================================================
+ *  ステージ初期化
+ * ========================================================================= */
+function loadHighScore() {
+  try { game.highScore = parseInt(localStorage.getItem(CFG.HIGHSCORE_KEY) || '0', 10) || 0; } catch (e) { game.highScore = 0; }
+}
+function saveHighScore() {
+  if (game.totalScore > game.highScore) {
+    game.highScore = game.totalScore;
+    try { localStorage.setItem(CFG.HIGHSCORE_KEY, String(game.highScore)); } catch (e) { /* ignore */ }
+  }
+}
+
+function zoneWidthForStage(stage) {
+  return Math.max(CFG.ZONE_WIDTH_MIN, CFG.ZONE_WIDTH_START * Math.pow(CFG.ZONE_WIDTH_SHRINK, stage - 1));
+}
+
+function windMaxForStage(stage) {
+  return Math.min(CFG.WIND_MAX, CFG.WIND_MAX_START + CFG.WIND_MAX_GROWTH * (stage - 1));
+}
+
+/* 崖の端から speed / angle / wind で飛んだときの水平到達距離 [m](閉形式) */
+function flightDistance(speed, angleDeg, wind) {
+  const v0 = speed * CFG.JUMP_SPEED_FACTOR;
+  const r = angleDeg * Math.PI / 180;
+  const vx = v0 * Math.cos(r), vy = v0 * Math.sin(r);
+  const g = CFG.GRAVITY;
+  const t = (vy + Math.sqrt(vy * vy + 2 * g * CLIFF_H)) / g;
+  return vx * t + 0.5 * wind * CFG.WIND_ACCEL_FACTOR * t * t;
+}
+
+/* この風で届く最大距離(最大速度・角度を総当たり) */
+function maxReach(wind) {
+  let best = 0;
+  for (let a = CFG.ANGLE_MIN; a <= CFG.ANGLE_MAX; a += 1) best = Math.max(best, flightDistance(CFG.MAX_SPEED, a, wind));
+  return best;
+}
+
+/* 着地ゾーン中心に届く (speed, angle) を探す。見つからなければ null */
+function solveJump(targetDist, wind) {
+  let best = null;
+  for (let a = CFG.ANGLE_MIN; a <= CFG.ANGLE_MAX; a += 1) {
+    // 距離は速度に対して単調増加なので二分探索
+    if (flightDistance(CFG.MAX_SPEED, a, wind) < targetDist) continue;
+    if (flightDistance(0, a, wind) > targetDist) continue;
+    let lo = 0, hi = CFG.MAX_SPEED;
+    for (let i = 0; i < 40; i++) {
+      const mid = (lo + hi) / 2;
+      if (flightDistance(mid, a, wind) < targetDist) lo = mid; else hi = mid;
+    }
+    const speed = (lo + hi) / 2;
+    const cost = Math.abs(a - CFG.DEMO_PREFER_ANGLE);
+    if (!best || cost < best.cost) best = { speed, angle: a, cost };
+  }
+  return best;
+}
+
+function setupStage() {
+  game.state = S.IDLE;
+  game.wind = (Math.random() * 2 - 1) * windMaxForStage(game.stage);
+  game.zoneWidth = zoneWidthForStage(game.stage);
+  // 向かい風で物理的に届かない距離にならないよう上限を抑える
+  const distMax = Math.min(CFG.ZONE_DIST_MAX, maxReach(game.wind) - 1.0);
+  const distMin = Math.min(CFG.ZONE_DIST_MIN, distMax);
+  game.zoneCenter = EDGE_X + distMin + Math.random() * Math.max(0, distMax - distMin);
+  game.demo = null;
+  game.menuSel = 1;
+  game.x = 1.5; game.y = CLIFF_H; game.vx = 0; game.vy = 0;
+  game.speed = 0; game.runPhase = 0;
+  game.pressed = false; game.pressTime = 0; game.charging = false; game.angle = CFG.ANGLE_MIN;
+  game.ranOff = false; game.takeoffDist = 0; game.takeoffFactor = 1;
+  game.timer = 0;
+}
+
+function newGame() {
+  game.stage = 1;
+  game.totalScore = 0;
+  setupStage();
+}
+
+/* =========================================================================
+ *  入力
+ * ========================================================================= */
+/* px, py は画面座標(キーボード入力のときは undefined) */
+function onPress(px, py) {
+  if (game.pressed) return;
+  game.pressed = true;
+  game.pressTime = 0;
+  game.charging = false;
+
+  switch (game.state) {
+    case S.IDLE:
+      game.state = S.RUN;
+      game.speed = Math.min(CFG.MAX_SPEED, game.speed + CFG.TAP_ACCEL);
+      break;
+    case S.RUN:
+      game.speed = Math.min(CFG.MAX_SPEED, game.speed + CFG.TAP_ACCEL);
+      break;
+    case S.SUCCESS:
+      if (game.timer >= 0.4) nextStage();
+      break;
+    case S.DEAD: {
+      if (game.timer < CFG.DEATH_ANIM_TIME) break;
+      let sel = game.menuSel;
+      if (px !== undefined) {
+        const hit = menuHitTest(px, py);
+        if (hit === null) break;      // ボタン外のタップは無視
+        sel = hit;
+      }
+      if (sel === 0) startDemo(); else newGame();
+      break;
+    }
+    case S.DEMO:
+      if (game.demo.phase === 'done' && game.timer >= 0.5) newGame();
+      break;
+  }
+}
+
+function menuMove(dir) {
+  if (game.state === S.DEAD && game.timer >= CFG.DEATH_ANIM_TIME) {
+    game.menuSel = dir < 0 ? 0 : 1;
+  }
+}
+
+/* ---- お手本デモ ---- */
+function startDemo() {
+  const sol = solveJump(game.zoneCenter - EDGE_X, game.wind);
+  const demo = { phase: 'run', reachable: !!sol, speed: 0, angle: CFG.ANGLE_MIN, path: [] };
+  if (sol) {
+    demo.speed = sol.speed; demo.angle = sol.angle;
+    // 予定軌道(点線表示用)
+    const v0 = sol.speed * CFG.JUMP_SPEED_FACTOR, r = sol.angle * Math.PI / 180;
+    let x = EDGE_X, y = CLIFF_H, vx = v0 * Math.cos(r), vy = v0 * Math.sin(r);
+    const dt = 1 / 60;
+    for (let i = 0; i < 2000 && y >= 0; i++) {
+      demo.path.push([x, y]);
+      vx += game.wind * CFG.WIND_ACCEL_FACTOR * dt; vy -= CFG.GRAVITY * dt;
+      x += vx * dt; y += vy * dt;
+    }
+  }
+  game.demo = demo;
+  game.x = 1.5; game.y = CLIFF_H; game.vx = 0; game.vy = 0;
+  game.speed = 0; game.runPhase = 0; game.charging = false; game.angle = CFG.ANGLE_MIN;
+  game.ranOff = false; game.timer = 0;
+  game.state = S.DEMO;
+}
+
+function onRelease() {
+  if (!game.pressed) return;
+  game.pressed = false;
+  if (game.state === S.RUN && game.charging) {
+    doJump();
+  }
+  game.charging = false;
+}
+
+function doJump() {
+  const dist = Math.max(0, EDGE_X - game.x);
+  const factor = Math.max(CFG.TAKEOFF_MIN_FACTOR, 1 - dist * CFG.TAKEOFF_PENALTY_PER_M);
+  const v0 = game.speed * CFG.JUMP_SPEED_FACTOR * factor;
+  const rad = game.angle * Math.PI / 180;
+  game.vx = v0 * Math.cos(rad);
+  game.vy = v0 * Math.sin(rad);
+  game.takeoffDist = dist;
+  game.takeoffFactor = factor;
+  game.state = S.AIR;
+}
+
+function nextStage() {
+  game.stage += 1;
+  setupStage();
+}
+
+window.addEventListener('keydown', (e) => {
+  if (e.code === 'Space' || e.key === ' ') {
+    e.preventDefault();
+    if (!e.repeat) onPress();
+  } else if (e.code === 'ArrowLeft' || e.code === 'KeyA') {
+    menuMove(-1);
+  } else if (e.code === 'ArrowRight' || e.code === 'KeyD') {
+    menuMove(1);
+  }
+});
+window.addEventListener('keyup', (e) => {
+  if (e.code === 'Space' || e.key === ' ') { e.preventDefault(); onRelease(); }
+});
+
+const canvas = document.getElementById('game');
+const IS_TOUCH = ('ontouchstart' in window) || (navigator.maxTouchPoints > 0);
+canvas.addEventListener('touchstart', (e) => {
+  e.preventDefault();
+  const t = e.changedTouches[0];
+  onPress(t.clientX, t.clientY);
+}, { passive: false });
+canvas.addEventListener('touchend', (e) => { e.preventDefault(); onRelease(); }, { passive: false });
+canvas.addEventListener('touchcancel', (e) => { e.preventDefault(); onRelease(); }, { passive: false });
+canvas.addEventListener('mousedown', (e) => { if (e.button === 0) onPress(e.clientX, e.clientY); });
+window.addEventListener('mouseup', (e) => { if (e.button === 0) onRelease(); });
+window.addEventListener('blur', onRelease);
+document.addEventListener('contextmenu', (e) => e.preventDefault());
+
+/* =========================================================================
+ *  物理更新(固定タイムステップ)
+ * ========================================================================= */
+function update(dt) {
+  game.time += dt;
+  if (game.pressed) game.pressTime += dt;
+
+  switch (game.state) {
+    case S.RUN: {
+      // 長押し判定 → 角度ゲージ
+      if (game.pressed && !game.charging && game.pressTime >= CFG.HOLD_THRESHOLD) {
+        game.charging = true;
+      }
+      if (game.charging) {
+        const t = game.pressTime - CFG.HOLD_THRESHOLD;
+        game.angle = Math.min(CFG.ANGLE_MAX, CFG.ANGLE_MIN + t * CFG.ANGLE_PER_SEC);
+      } else {
+        game.angle = CFG.ANGLE_MIN;
+      }
+      // 自然減速と前進
+      game.speed = Math.max(0, game.speed - CFG.RUN_DECEL * dt);
+      game.x += game.speed * dt;
+      game.runPhase += game.speed * dt * 1.6;
+      // 端を越えたら踏み切れずに落下
+      if (game.x >= EDGE_X) {
+        game.ranOff = true;
+        game.charging = false;
+        game.vx = game.speed; game.vy = 0;
+        game.state = S.AIR;
+      }
+      break;
+    }
+    case S.AIR: {
+      game.vx += game.wind * CFG.WIND_ACCEL_FACTOR * dt;
+      game.vy -= CFG.GRAVITY * dt;
+      game.x += game.vx * dt;
+      game.y += game.vy * dt;
+
+      if (game.x < EDGE_X) {
+        if (game.y <= CLIFF_H && game.vy <= 0 && !game.ranOff) {
+          // 崖の上に戻ってきた → そのまま助走を続行
+          game.y = CLIFF_H;
+          game.speed = Math.max(0, game.vx);
+          game.vx = 0; game.vy = 0;
+          game.state = S.RUN;
+          break;
+        }
+        if (game.y < CLIFF_H) {
+          // 崖の壁に押し戻された
+          game.x = EDGE_X; game.vx = 0;
+        }
+      }
+      if (game.y <= 0) {
+        game.y = 0;
+        land();
+      }
+      break;
+    }
+    case S.SUCCESS:
+      game.timer += dt;
+      if (game.timer >= CFG.RESULT_WAIT) nextStage();
+      break;
+    case S.DEAD:
+      game.timer += dt;
+      break;
+    case S.DEMO:
+      updateDemo(dt);
+      break;
+  }
+  updatePuffs(dt);
+}
+
+/* ---- やわらか着地 ---- */
+function softLandingActive() {
+  return game.state === S.SUCCESS || (game.state === S.DEMO && game.demo && game.demo.phase === 'done' && game.demo.reachable);
+}
+/* 着地から t 秒後のマットの沈み [m](正: 沈む、負: 少し盛り上がる) */
+function matDentDepth(t) {
+  return CFG.MAT_DENT_DEPTH * Math.exp(-CFG.MAT_DAMPING * t) * Math.cos(CFG.MAT_BOUNCE_FREQ * t);
+}
+/* ワールド x におけるマット表面の沈み [m] */
+function matDentAt(x) {
+  if (!softLandingActive()) return 0;
+  const d = (x - game.landX) / CFG.MAT_DENT_WIDTH;
+  return matDentDepth(game.timer) * Math.exp(-d * d);
+}
+function spawnPuffs(x) {
+  game.puffs = [];
+  for (let i = 0; i < 14; i++) {
+    const a = Math.PI * (0.15 + Math.random() * 0.7);   // 上向き扇状
+    const sp = 1.2 + Math.random() * 2.2;
+    game.puffs.push({ x: x + (Math.random() - 0.5) * 0.6, y: 0.1, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp,
+      r: 0.12 + Math.random() * 0.16, life: 0.6 + Math.random() * 0.5, age: 0 });
+  }
+}
+function updatePuffs(dt) {
+  for (const p of game.puffs) {
+    p.age += dt;
+    p.vx *= 0.97; p.vy = p.vy * 0.96 + 0.6 * dt;  // ゆっくり浮く
+    p.x += p.vx * dt; p.y += p.vy * dt;
+  }
+  game.puffs = game.puffs.filter(p => p.age < p.life);
+}
+
+function updateDemo(dt) {
+  const d = game.demo;
+  if (d.phase === 'run') {
+    if (!d.reachable) { d.phase = 'done'; game.timer = 0; return; }
+    game.speed = Math.min(d.speed, game.speed + CFG.DEMO_RUN_ACCEL * dt);
+    game.x += game.speed * dt;
+    game.runPhase += game.speed * dt * 1.6;
+    // 端に着くまでの時間から逆算して、ちょうど端で目標角度になるよう溜め始める
+    const holdTime = (d.angle - CFG.ANGLE_MIN) / CFG.ANGLE_PER_SEC;
+    const timeToEdge = (EDGE_X - game.x) / Math.max(0.1, game.speed);
+    if (!game.charging && timeToEdge <= holdTime) game.charging = true;
+    if (game.charging) game.angle = Math.min(d.angle, game.angle + CFG.ANGLE_PER_SEC * dt);
+    if (game.x >= EDGE_X) {
+      game.x = EDGE_X; game.speed = d.speed; game.angle = d.angle; game.charging = false;
+      doJump();              // doJump は state を AIR にするので DEMO に戻す
+      game.state = S.DEMO;
+      d.phase = 'air';
+    }
+  } else if (d.phase === 'air') {
+    game.vx += game.wind * CFG.WIND_ACCEL_FACTOR * dt;
+    game.vy -= CFG.GRAVITY * dt;
+    game.x += game.vx * dt;
+    game.y += game.vy * dt;
+    if (game.y <= 0) {
+      game.y = 0; game.landX = game.x;
+      d.phase = 'done'; game.timer = 0;
+      spawnPuffs(game.x);
+    }
+  } else {
+    game.timer += dt;
+  }
+}
+
+function land() {
+  game.landX = game.x;
+  game.timer = 0;
+  const half = game.zoneWidth / 2;
+  const off = Math.abs(game.x - game.zoneCenter);
+  if (!game.ranOff && off <= half) {
+    const ratio = 1 - off / half;
+    const pts = Math.round(CFG.SCORE_MIN + (CFG.SCORE_MAX - CFG.SCORE_MIN) * ratio);
+    game.lastScore = pts;
+    game.lastRank = pts >= CFG.PERFECT_SCORE ? 'PERFECT!' : pts >= CFG.GREAT_SCORE ? 'GREAT!' : 'GOOD';
+    game.totalScore += pts;
+    saveHighScore();
+    spawnPuffs(game.x);
+    game.state = S.SUCCESS;
+  } else {
+    const pool = game.ranOff ? RANOFF_MESSAGES : DEATH_MESSAGES;
+    game.deathMsg = pool[Math.floor(Math.random() * pool.length)];
+    game.deathX = game.x;
+    game.menuSel = 1;
+    saveHighScore();
+    game.state = S.DEAD;
+  }
+}
+
+/* =========================================================================
+ *  描画
+ * ========================================================================= */
+const ctx = canvas.getContext('2d');
+let W = 0, H = 0, DPR = 1;
+let scale = 10, originX = 0, groundY = 0; // ワールド → 画面変換
+
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = Math.floor(W * DPR); canvas.height = Math.floor(H * DPR);
+  canvas.style.width = W + 'px'; canvas.style.height = H + 'px';
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+
+  const hudTop = 70; // 上部 HUD の高さ(px)
+  const padX = 8, padBottom = Math.max(24, H * 0.06);
+  scale = Math.min((W - padX * 2) / WORLD_W, (H - hudTop - padBottom) / WORLD_H);
+  originX = (W - WORLD_W * scale) / 2;
+  groundY = H - padBottom;
+}
+window.addEventListener('resize', resize);
+window.addEventListener('orientationchange', () => setTimeout(resize, 100));
+
+const sx = (x) => originX + x * scale;
+const sy = (y) => groundY - y * scale;
+
+function render() {
+  drawSky();
+  drawGround();
+  drawCliff();
+  drawCharacter();
+  drawSoftLanding();
+  drawHUD();
+  drawMessages();
+}
+
+function drawSky() {
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, '#4a90d9');
+  g.addColorStop(0.7, '#9fd0f5');
+  g.addColorStop(1, '#e8f4fc');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, W, H);
+  // 雲(風で流れる)
+  ctx.fillStyle = 'rgba(255,255,255,0.75)';
+  for (let i = 0; i < 5; i++) {
+    const base = (i * 173) % 1000 / 1000;
+    const cx = ((base * W + game.time * game.wind * 6) % (W + 160) + W + 160) % (W + 160) - 80;
+    const cy = H * (0.12 + ((i * 97) % 100) / 100 * 0.25);
+    const r = 14 + (i % 3) * 6;
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, 0, Math.PI * 2);
+    ctx.arc(cx + r * 0.9, cy + r * 0.2, r * 0.8, 0, Math.PI * 2);
+    ctx.arc(cx - r * 0.9, cy + r * 0.25, r * 0.7, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+function drawGround() {
+  const gy = sy(0);
+  // ハズレ地帯
+  ctx.fillStyle = '#5a4634';
+  ctx.fillRect(0, gy, W, H - gy);
+  ctx.fillStyle = '#6e5540';
+  for (let px = sx(EDGE_X); px < W; px += 18) ctx.fillRect(px, gy + 6, 9, 3);
+  // とげとげ表現(ハズレ感)
+  ctx.fillStyle = '#4a3828';
+  for (let px = sx(EDGE_X) + 4; px < W; px += 12) {
+    ctx.beginPath(); ctx.moveTo(px, gy); ctx.lineTo(px + 4, gy - 4); ctx.lineTo(px + 8, gy); ctx.fill();
+  }
+  // 着地ゾーン = ふかふかのマット。着地すると沈んで戻る
+  const zL = game.zoneCenter - game.zoneWidth / 2, zR = game.zoneCenter + game.zoneWidth / 2;
+  const zl = sx(zL), zw = game.zoneWidth * scale;
+  const matH = Math.max(12, scale * 1.0);           // マットの厚み(px)
+  const matTop = gy - 3;
+  const corner = Math.min(6, matH * 0.4);
+  // 表面の形(沈みを反映)を左から右へサンプリング
+  const surface = [];
+  const n = Math.max(8, Math.floor(zw / 3));
+  for (let i = 0; i <= n; i++) {
+    const wx = zL + (zR - zL) * i / n;
+    surface.push([sx(wx), matTop + matDentAt(wx) * scale]);
+  }
+  const matPath = () => {
+    ctx.beginPath();
+    ctx.moveTo(zl, gy + matH);
+    ctx.lineTo(zl, surface[0][1] + corner);
+    ctx.quadraticCurveTo(zl, surface[0][1], zl + corner, surface[0][1]);
+    for (let i = 1; i < surface.length; i++) ctx.lineTo(surface[i][0], surface[i][1]);
+    ctx.quadraticCurveTo(zl + zw, surface[n][1], zl + zw, surface[n][1] + corner);
+    ctx.lineTo(zl + zw, gy + matH);
+    ctx.closePath();
+  };
+  // 本体(上が明るいグラデーション)
+  const mg = ctx.createLinearGradient(0, matTop - 4, 0, gy + matH);
+  mg.addColorStop(0, '#7fe08a');
+  mg.addColorStop(0.35, '#4cc45e');
+  mg.addColorStop(1, '#2f8f3c');
+  ctx.fillStyle = mg;
+  matPath(); ctx.fill();
+  // 柔らかさを表すキルティングの縫い目(中央の印を避けて配置)
+  ctx.save();
+  matPath(); ctx.clip();
+  ctx.strokeStyle = 'rgba(255,255,255,0.28)'; ctx.lineWidth = 1;
+  const seam = Math.max(10, scale * 1.4);
+  for (let px = zl + seam; px < zl + zw; px += seam) {
+    ctx.beginPath(); ctx.moveTo(px, matTop - 6); ctx.lineTo(px - 3, gy + matH); ctx.stroke();
+  }
+  ctx.beginPath(); ctx.moveTo(zl, matTop + matH * 0.55); ctx.lineTo(zl + zw, matTop + matH * 0.55); ctx.stroke();
+  ctx.restore();
+  // ふちのハイライト
+  ctx.strokeStyle = 'rgba(255,255,255,0.55)'; ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.moveTo(zl + corner, surface[0][1]);
+  for (let i = 1; i < surface.length; i++) ctx.lineTo(surface[i][0], surface[i][1]);
+  ctx.stroke();
+  // 中央の印(旗 + 的)。旗も沈みに合わせて少し揺れる
+  const cx = sx(game.zoneCenter);
+  const flagBase = matTop + matDentAt(game.zoneCenter) * scale;
+  const flagTilt = softLandingActive() ? Math.sin(game.timer * CFG.MAT_BOUNCE_FREQ) * Math.exp(-CFG.MAT_DAMPING * game.timer) * 0.25 : 0;
+  ctx.save();
+  ctx.translate(cx, flagBase);
+  ctx.rotate(flagTilt);
+  ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(0, -scale * 2.2); ctx.stroke();
+  ctx.fillStyle = '#ff3b3b';
+  ctx.beginPath();
+  ctx.moveTo(0, -scale * 2.2);
+  ctx.lineTo(scale * 1.2, -scale * 1.8);
+  ctx.lineTo(0, -scale * 1.4);
+  ctx.fill();
+  ctx.restore();
+  ctx.fillStyle = 'rgba(255,255,255,0.85)';
+  ctx.fillRect(cx - 1.5, flagBase, 3, gy + matH - flagBase);
+  // ゾーン幅の表示
+  ctx.fillStyle = '#ffffff';
+  ctx.font = `${Math.max(10, Math.min(13, scale * 1.1))}px sans-serif`;
+  ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  ctx.fillText(`${game.zoneWidth.toFixed(1)}m`, cx, gy + matH + 3);
+}
+
+/* やわらか着地の粒(文字は出さず、見た目だけでふんわり感を出す) */
+function drawSoftLanding() {
+  const h = CFG.CHAR_HEIGHT * scale;
+  for (const p of game.puffs) {
+    const k = 1 - p.age / p.life;
+    ctx.fillStyle = `rgba(235,255,225,${0.7 * k})`;
+    ctx.beginPath(); ctx.arc(sx(p.x), sy(p.y), p.r * scale * (1.6 - k * 0.6), 0, Math.PI * 2); ctx.fill();
+  }
+}
+
+function drawCliff() {
+  const top = sy(CLIFF_H), right = sx(EDGE_X), left = sx(0) - 50;
+  const g = ctx.createLinearGradient(left, top, right, top);
+  g.addColorStop(0, '#6b5341');
+  g.addColorStop(1, '#8a6b52');
+  ctx.fillStyle = g;
+  ctx.fillRect(left, top, right - left, sy(0) - top);
+  // 岩の模様
+  ctx.strokeStyle = 'rgba(0,0,0,0.15)'; ctx.lineWidth = 1;
+  for (let i = 1; i < 8; i++) {
+    const yy = top + (sy(0) - top) * i / 8;
+    ctx.beginPath(); ctx.moveTo(left, yy); ctx.lineTo(right - (i % 2) * 10, yy + 6); ctx.stroke();
+  }
+  // 芝
+  ctx.fillStyle = '#4caf50';
+  ctx.fillRect(left, top - 4, right - left, 6);
+  // スタートライン
+  const startX = sx(1.5);
+  ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(startX, top - 4); ctx.lineTo(startX, top + 8); ctx.stroke();
+  // 崖の端の警告マーク
+  ctx.fillStyle = '#ffcc00';
+  ctx.fillRect(right - 4, top - 4, 4, 6);
+  ctx.fillStyle = '#000';
+  ctx.fillRect(right - 2, top - 4, 2, 6);
+}
+
+/* ---- 棒人間 ---- */
+function drawCharacter() {
+  const h = CFG.CHAR_HEIGHT * scale;       // 身長(px)
+  let fx = sx(game.x), fy = sy(game.y);    // 足元
+  fy += matDentAt(game.x) * scale;         // マットの沈みに足元を合わせる(着地成功時のみ非 0)
+  let sink = 0, pose = 'stand';
+  const st = game.state;
+
+  const isDemo = st === S.DEMO;
+  if (st === S.RUN) pose = game.charging ? 'crouch' : (game.speed > 0.2 ? 'run' : 'stand');
+  else if (st === S.AIR) pose = game.ranOff ? 'flail' : (game.vy > 0 ? 'jump' : 'flail');
+  else if (st === S.SUCCESS) pose = game.timer < 0.35 ? 'land' : 'cheer';
+  else if (st === S.DEAD) { pose = 'dead'; sink = Math.min(1, game.timer / 0.6); }
+  else if (isDemo) {
+    const ph = game.demo.phase;
+    if (ph === 'run') pose = game.charging ? 'crouch' : (game.speed > 0.2 ? 'run' : 'stand');
+    else if (ph === 'air') pose = game.vy > 0 ? 'jump' : 'flail';
+    else pose = game.demo.reachable && game.timer < 0.35 ? 'land' : 'cheer';
+    // デモ中は前回の墓石と予定軌道を残しておく
+    drawTombstone(sx(game.deathX), sy(0), h, 1);
+    drawDemoPath();
+  }
+
+  const lw = Math.max(1.5, h * 0.07);
+  ctx.save();
+  ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  const col = isDemo ? '#1e5bd6' : '#111';   // デモのお手本は青いゴースト
+  ctx.strokeStyle = col; ctx.fillStyle = col; ctx.lineWidth = lw;
+
+  if (pose === 'dead') {
+    // 地面にめり込む(頭から)
+    const gy = sy(0);
+    ctx.save();
+    ctx.beginPath(); ctx.rect(0, 0, W, gy); ctx.clip();
+    const bodyTop = gy - h * 0.9 * (1 - sink) + h * 0.2 * sink; // 下へ沈む
+    // 逆さまの棒人間
+    const headY = bodyTop + h * 0.9; // 頭が下
+    ctx.beginPath(); ctx.moveTo(fx, bodyTop); ctx.lineTo(fx, headY - h * 0.12); ctx.stroke();
+    ctx.beginPath(); ctx.arc(fx, headY, h * 0.12, 0, Math.PI * 2); ctx.fill();
+    // 足が上でバタバタ
+    const wig = Math.sin(game.time * 20) * h * 0.15 * (1 - sink);
+    ctx.beginPath(); ctx.moveTo(fx, bodyTop); ctx.lineTo(fx - h * 0.2 + wig, bodyTop - h * 0.3); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(fx, bodyTop); ctx.lineTo(fx + h * 0.2 - wig, bodyTop - h * 0.3); ctx.stroke();
+    ctx.restore();
+    // 砂煙
+    if (game.timer < 0.5) {
+      ctx.fillStyle = `rgba(200,180,150,${0.6 * (1 - game.timer / 0.5)})`;
+      for (let i = -2; i <= 2; i++) {
+        ctx.beginPath(); ctx.arc(fx + i * h * 0.3, gy - h * 0.1 - game.timer * 40, h * 0.15 + game.timer * 10, 0, Math.PI * 2); ctx.fill();
+      }
+    }
+    // 墓石
+    const tRise = Math.max(0, Math.min(1, (game.timer - 0.6) / 0.7));
+    if (tRise > 0) drawTombstone(fx, gy, h, tRise);
+    ctx.restore();
+    return;
+  }
+
+  // 通常ポーズ(座標は足元基準、上が負)
+  const hipY = -h * 0.45, shoulderY = -h * 0.78, headR = h * 0.12, headY = -h * 0.88;
+  let legs, arms, lean = 0, squat = 0;
+  const ph = game.runPhase;
+  switch (pose) {
+    case 'run': {
+      // 太もも・すね・上腕・前腕を関節角度で動かす走りサイクル
+      const spd = Math.min(1, game.speed / CFG.MAX_SPEED);
+      const THIGH = 0.23, SHIN = 0.23, UARM = 0.19, FARM = 0.17;
+      const hipU = 0.45, shU = 0.78;
+      const leg = (p) => {
+        const alpha = (0.45 + 0.4 * spd) * Math.sin(p);                         // 太ももの前後振り
+        const bend = 0.2 + (0.8 + 0.6 * spd) * Math.max(0, Math.cos(p - 0.4));  // 膝の曲げ(前に振り出す時に最大)
+        const kx = Math.sin(alpha) * THIGH, ky = hipU - Math.cos(alpha) * THIGH;
+        const ax = kx + Math.sin(alpha - bend) * SHIN, ay = ky - Math.cos(alpha - bend) * SHIN;
+        return [kx, ky, ax, ay];
+      };
+      const arm = (p) => {
+        const gamma = -(0.6 + 0.4 * spd) * Math.sin(p);                          // 上腕の前後振り(脚と逆位相)
+        const ex = Math.sin(gamma) * UARM, ey = -shU + Math.cos(gamma) * UARM;
+        const hx = ex + Math.sin(gamma + 1.7) * FARM, hy = ey + Math.cos(gamma + 1.7) * FARM;
+        return [ex, ey, hx, hy];
+      };
+      legs = [leg(ph), leg(ph + Math.PI)];
+      arms = [arm(ph), arm(ph + Math.PI)];
+      squat = Math.abs(Math.sin(ph)) * h * 0.03;   // 上下動
+      lean = 0.12 + spd * 0.18;
+      break;
+    }
+    case 'crouch': {
+      squat = h * 0.15;
+      legs = [[-0.18, 0.3, -0.1, 0.0], [0.18, 0.3, 0.1, 0.0]];
+      arms = [[-0.2, -0.5, -0.3, -0.3], [-0.2, -0.5, -0.3, -0.3]];
+      lean = 0.3;
+      break;
+    }
+    case 'jump':
+      legs = [[-0.1, 0.25, -0.3, 0.1], [0.25, 0.3, 0.35, 0.1]];
+      arms = [[0.25, -0.95, 0.4, -1.1], [0.15, -0.9, 0.3, -1.1]];
+      lean = 0.2;
+      break;
+    case 'flail': {
+      const w = Math.sin(game.time * 18);
+      legs = [[-0.25 + w * 0.1, 0.2, -0.3, 0.0], [0.25 - w * 0.1, 0.25, 0.3, 0.05]];
+      arms = [[-0.35, -0.9, -0.45 + w * 0.1, -1.05], [0.35, -0.9, 0.45 - w * 0.1, -1.05]];
+      lean = -0.1;
+      break;
+    }
+    case 'land': {
+      // マットに沈みながら膝で受ける。沈みが深いほど深く屈む
+      const dent = matDentDepth(game.timer) / CFG.MAT_DENT_DEPTH;  // 1 → 0 → 少し負
+      squat = h * 0.22 * Math.max(0, dent);
+      legs = [[-0.2, 0.28, -0.22, 0.0], [0.2, 0.28, 0.22, 0.0]];
+      arms = [[-0.25, -0.6, -0.45, -0.7], [0.25, -0.6, 0.45, -0.7]];   // 両腕を広げてバランス
+      break;
+    }
+    case 'cheer': {
+      const w = Math.abs(Math.sin(game.time * 10)) * 0.1;
+      legs = [[-0.15, 0.2, -0.2, 0.0], [0.15, 0.2, 0.2, 0.0]];
+      arms = [[-0.3, -0.95, -0.4, -1.1 - w], [0.3, -0.95, 0.4, -1.1 - w]];
+      break;
+    }
+    default:
+      legs = [[-0.08, 0.22, -0.1, 0.0], [0.08, 0.22, 0.1, 0.0]];
+      arms = [[-0.15, -0.55, -0.18, -0.35], [0.15, -0.55, 0.18, -0.35]];
+  }
+
+  ctx.translate(fx, fy);
+  ctx.rotate(lean);
+  const P = (px, py) => [px * h, py * h];
+  // 脚:腰 → 膝 → 足
+  for (const [kx, ky, ax, ay] of legs) {
+    ctx.beginPath(); ctx.moveTo(0, hipY + squat);
+    ctx.lineTo(kx * h, -h * ky + squat); ctx.lineTo(ax * h, -h * ay); ctx.stroke();
+  }
+  // 胴
+  ctx.beginPath(); ctx.moveTo(0, hipY + squat); ctx.lineTo(0, shoulderY + squat); ctx.stroke();
+  // 腕:肩 → 肘 → 手
+  for (const [ex, ey, hx, hy] of arms) {
+    ctx.beginPath(); ctx.moveTo(0, shoulderY + squat);
+    ctx.lineTo(ex * h, ey * h + squat); ctx.lineTo(hx * h, hy * h + squat); ctx.stroke();
+  }
+  // 頭
+  ctx.beginPath(); ctx.arc(0, headY + squat, headR, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+
+  // 角度ゲージ(溜め中)
+  if ((st === S.RUN || isDemo) && game.charging) drawAngleGauge(fx, fy - h * 0.6, h);
+}
+
+function drawDemoPath() {
+  const d = game.demo;
+  if (!d || d.path.length < 2) return;
+  ctx.save();
+  ctx.strokeStyle = 'rgba(30,91,214,0.6)'; ctx.lineWidth = 2;
+  ctx.setLineDash([4, 6]);
+  ctx.beginPath();
+  ctx.moveTo(sx(d.path[0][0]), sy(d.path[0][1]));
+  for (let i = 1; i < d.path.length; i++) ctx.lineTo(sx(d.path[i][0]), sy(d.path[i][1]));
+  ctx.stroke();
+  ctx.restore();
+}
+
+/* ---- 死亡後メニュー(デモを見る / リトライ) ---- */
+function menuRects() {
+  const small = W < 480;
+  const bw = small ? 130 : 180, bh = small ? 44 : 52, gap = small ? 12 : 24;
+  const y = H * 0.62;
+  const x0 = W / 2 - bw - gap / 2, x1 = W / 2 + gap / 2;
+  return [
+    { x: x0, y, w: bw, h: bh, label: 'お手本を見る' },
+    { x: x1, y, w: bw, h: bh, label: 'リトライ' },
+  ];
+}
+function menuHitTest(px, py) {
+  const rs = menuRects();
+  for (let i = 0; i < rs.length; i++) {
+    const r = rs[i];
+    if (px >= r.x && px <= r.x + r.w && py >= r.y && py <= r.y + r.h) return i;
+  }
+  return null;
+}
+function drawMenu() {
+  const rs = menuRects();
+  const small = W < 480;
+  ctx.save();
+  rs.forEach((r, i) => {
+    const sel = i === game.menuSel;
+    ctx.fillStyle = sel ? 'rgba(255,224,102,0.95)' : 'rgba(0,0,0,0.45)';
+    ctx.strokeStyle = sel ? '#fff' : 'rgba(255,255,255,0.6)';
+    ctx.lineWidth = sel ? 3 : 1.5;
+    roundRect(r.x, r.y, r.w, r.h, 10);
+    ctx.fill(); ctx.stroke();
+    ctx.fillStyle = sel ? '#222' : '#fff';
+    ctx.font = `bold ${small ? 14 : 17}px sans-serif`;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(r.label, r.x + r.w / 2, r.y + r.h / 2);
+  });
+  ctx.fillStyle = 'rgba(255,255,255,0.85)';
+  ctx.font = `${small ? 11 : 13}px sans-serif`;
+  ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  ctx.fillText(IS_TOUCH ? 'タップで選択' : '← → で選択、SPACE で決定(クリックでも可)', W / 2, rs[0].y + rs[0].h + 10);
+  ctx.restore();
+}
+function roundRect(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+function drawTombstone(x, gy, h, t) {
+  const th = h * 1.3 * t, tw = h * 0.9;
+  ctx.save();
+  ctx.beginPath(); ctx.rect(0, 0, W, gy); ctx.clip();
+  const top = gy - th;
+  ctx.fillStyle = '#9a9a9a';
+  ctx.beginPath();
+  ctx.moveTo(x - tw / 2, gy + 2);
+  ctx.lineTo(x - tw / 2, top + tw / 2);
+  ctx.arc(x, top + tw / 2, tw / 2, Math.PI, 0);
+  ctx.lineTo(x + tw / 2, gy + 2);
+  ctx.closePath(); ctx.fill();
+  ctx.strokeStyle = '#555'; ctx.lineWidth = 1.5; ctx.stroke();
+  // 十字
+  ctx.strokeStyle = '#444'; ctx.lineWidth = Math.max(2, h * 0.08);
+  ctx.beginPath();
+  ctx.moveTo(x, top + tw * 0.35); ctx.lineTo(x, top + tw * 0.95);
+  ctx.moveTo(x - tw * 0.2, top + tw * 0.55); ctx.lineTo(x + tw * 0.2, top + tw * 0.55);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawAngleGauge(x, y, h) {
+  const r = Math.max(28, h * 1.6);
+  const minR = CFG.ANGLE_MIN * Math.PI / 180, maxR = CFG.ANGLE_MAX * Math.PI / 180;
+  const cur = game.angle * Math.PI / 180;
+  ctx.save();
+  // 背景弧
+  ctx.strokeStyle = 'rgba(255,255,255,0.5)'; ctx.lineWidth = 6;
+  ctx.beginPath(); ctx.arc(x, y, r, -maxR, -minR); ctx.stroke();
+  // 現在値
+  const ratio = (game.angle - CFG.ANGLE_MIN) / (CFG.ANGLE_MAX - CFG.ANGLE_MIN);
+  ctx.strokeStyle = `hsl(${120 - ratio * 120}, 90%, 50%)`;
+  ctx.beginPath(); ctx.arc(x, y, r, -cur, -minR); ctx.stroke();
+  // 矢印
+  ctx.strokeStyle = '#ff3b3b'; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x + Math.cos(cur) * r * 1.25, y - Math.sin(cur) * r * 1.25); ctx.stroke();
+  ctx.fillStyle = '#fff'; ctx.font = `bold ${Math.max(12, h * 0.6)}px sans-serif`;
+  ctx.textAlign = 'left'; ctx.textBaseline = 'bottom';
+  ctx.shadowColor = 'rgba(0,0,0,0.6)'; ctx.shadowBlur = 4;
+  ctx.fillText(`${Math.round(game.angle)}°`, x + r * 0.4, y - r * 0.4);
+  ctx.restore();
+}
+
+/* ---- HUD ---- */
+function drawHUD() {
+  const small = W < 480;
+  const fs = small ? 12 : 14;
+  ctx.save();
+  ctx.shadowColor = 'rgba(0,0,0,0.5)'; ctx.shadowBlur = 3;
+  ctx.fillStyle = '#fff';
+  ctx.textBaseline = 'top';
+
+  // 左:ステージ・スコア
+  ctx.textAlign = 'left';
+  ctx.font = `bold ${fs + 4}px sans-serif`;
+  ctx.fillText(`STAGE ${game.stage}`, 12, 10);
+  ctx.font = `${fs}px sans-serif`;
+  ctx.fillText(`SCORE ${game.totalScore}`, 12, 10 + fs + 8);
+  ctx.fillText(`BEST ${game.highScore}`, 12, 10 + (fs + 4) * 2);
+
+  // 右:速度ゲージ
+  const gw = small ? 90 : 130, gh = 12;
+  const gx = W - 12 - gw, gy = 12;
+  ctx.font = `${fs}px sans-serif`; ctx.textAlign = 'right';
+  ctx.fillText(`SPEED ${game.speed.toFixed(1)} m/s`, W - 12, gy + gh + 4);
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = 'rgba(0,0,0,0.35)';
+  ctx.fillRect(gx, gy, gw, gh);
+  const sr = Math.min(1, game.speed / CFG.MAX_SPEED);
+  ctx.fillStyle = `hsl(${120 - sr * 120}, 85%, 50%)`;
+  ctx.fillRect(gx, gy, gw * sr, gh);
+  ctx.strokeStyle = 'rgba(255,255,255,0.7)'; ctx.lineWidth = 1;
+  ctx.strokeRect(gx + 0.5, gy + 0.5, gw - 1, gh - 1);
+
+  // 中央:風
+  drawWind(W / 2, 14, small);
+  ctx.restore();
+}
+
+function drawWind(cx, cy, small) {
+  const spd = Math.abs(game.wind);
+  const dir = Math.sign(game.wind);
+  const fs = small ? 12 : 14;
+  ctx.save();
+  ctx.shadowColor = 'rgba(0,0,0,0.5)'; ctx.shadowBlur = 3;
+  ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  ctx.font = `bold ${fs}px sans-serif`;
+  ctx.fillText(spd < 0.3 ? '無風' : `風 ${spd.toFixed(1)} m/s`, cx, cy);
+  if (spd >= 0.3) {
+    const len = 14 + (spd / CFG.WIND_MAX) * (small ? 40 : 70);
+    const y = cy + fs + 12;
+    const r = spd / CFG.WIND_MAX;
+    ctx.strokeStyle = ctx.fillStyle = `hsl(${50 - r * 50}, 100%, ${65 - r * 15}%)`;
+    ctx.lineWidth = 4; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(cx - dir * len / 2, y); ctx.lineTo(cx + dir * len / 2, y); ctx.stroke();
+    const tip = cx + dir * len / 2;
+    ctx.beginPath();
+    ctx.moveTo(tip + dir * 6, y);
+    ctx.lineTo(tip - dir * 4, y - 6);
+    ctx.lineTo(tip - dir * 4, y + 6);
+    ctx.closePath(); ctx.fill();
+  }
+  ctx.restore();
+}
+
+/* ---- メッセージ ---- */
+/* opts.x を渡すとその位置を中心に描く(省略時は画面中央)。opts.outline で縁取り */
+function centerText(lines, baseY, opts = {}) {
+  const { size = 28, color = '#fff', bold = true, gap = 8, x = W / 2, outline = false } = opts;
+  ctx.save();
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.shadowColor = 'rgba(0,0,0,0.7)'; ctx.shadowBlur = 8;
+  ctx.lineJoin = 'round';
+  let y = baseY;
+  for (const ln of lines) {
+    const s = typeof ln === 'string' ? { text: ln } : ln;
+    const fsz = s.size || size;
+    ctx.font = `${(s.bold ?? bold) ? 'bold ' : ''}${fsz}px sans-serif`;
+    if (outline) { ctx.strokeStyle = 'rgba(0,0,0,0.85)'; ctx.lineWidth = Math.max(3, fsz * 0.12); ctx.strokeText(s.text, x, y); }
+    ctx.fillStyle = s.color || color;
+    ctx.fillText(s.text, x, y);
+    y += fsz + gap;
+  }
+  ctx.restore();
+}
+
+/* 棒人間の頭上に出す吹き出し用の座標(画面端ではみ出さないよう x を抑える) */
+function charLabelPos(offsetH = 1.5) {
+  const h = CFG.CHAR_HEIGHT * scale;
+  const x = Math.min(W - 110, Math.max(110, sx(game.x)));
+  const y = Math.max(60, sy(game.y) - h * offsetH);
+  return { x, y };
+}
+
+function drawMessages() {
+  const small = W < 480;
+  const big = small ? 26 : 40, mid = small ? 15 : 20, sm = small ? 12 : 15;
+  const cy = H * 0.38;
+  const blink = Math.sin(game.time * 4) > -0.3;
+  const dist = (game.zoneCenter - EDGE_X).toFixed(1);
+  const portraitPhone = IS_TOUCH && H > W;
+
+  switch (game.state) {
+    case S.IDLE:
+      centerText([
+        { text: 'I CAN FLY', size: big + 8, color: '#fffbe6' },
+        { text: `着地ゾーンまで ${dist}m / 幅 ${game.zoneWidth.toFixed(1)}m`, size: sm, bold: false },
+        { text: '' },
+        { text: '連打で加速、崖の端で長押し → 離してジャンプ', size: sm, bold: false },
+        { text: portraitPhone ? "📱 横持ちがおすすめです" : "", size: sm, color: "#ffd166" },
+        { text: blink ? (small ? 'タップでスタート' : 'SPACE / タップでスタート') : '', size: mid, color: '#ffe066' },
+      ], cy - big);
+      break;
+    case S.RUN: {
+      const remain = EDGE_X - game.x;
+      const lines = [];
+      if (game.charging) lines.push({ text: '離してジャンプ！', size: mid, color: '#ffe066' });
+      else if (remain < 3) lines.push({ text: '長押し！', size: mid, color: '#ff8a65' });
+      const p = charLabelPos(game.charging ? 3.2 : 1.6);   // 溜め中は角度ゲージの上に出す
+      centerText(lines, p.y, { x: p.x, outline: true });
+      break;
+    }
+    case S.AIR: {
+      // 空中の文字は棒人間に追従させず、崖の端を基準にした固定位置に出す
+      const h = CFG.CHAR_HEIGHT * scale;
+      const edgeX = Math.min(W - 120, Math.max(120, sx(EDGE_X)));
+      if (game.ranOff) {
+        // 踏み切り忘れ:崖の端の真上に大きく「あっ」(落ちていく人間とは重ならない)
+        const wob = 1 + Math.sin(game.time * 14) * 0.06;
+        centerText([{ text: 'あっ', size: (big + 16) * wob, color: '#fff' }], sy(CLIFF_H) - h * 2.2, { x: edgeX, outline: true });
+      } else if (game.takeoffDist > 0.5) {
+        // 早すぎた踏み切り:崖の端の少し下(軌道の下側)に表示
+        centerText([
+          { text: `${game.takeoffDist.toFixed(1)}m 手前で踏み切り`, size: sm + 1, color: '#ffd9b3' },
+          { text: `初速 ×${game.takeoffFactor.toFixed(2)}`, size: sm, bold: false, color: '#ffd9b3' },
+        ], sy(CLIFF_H) + h * 1.6, { x: edgeX, outline: true, gap: 4 });
+      }
+      break;
+    }
+    case S.SUCCESS: {
+      const perfect = game.lastRank === 'PERFECT!';
+      const pulse = 1 + (perfect ? Math.sin(game.time * 12) * 0.08 : 0);
+      const color = perfect ? `hsl(${(game.time * 300) % 360}, 100%, 65%)` : game.lastRank === 'GREAT!' ? '#ffe066' : '#d0f0ff';
+      const off = Math.abs(game.landX - game.zoneCenter);
+      centerText([
+        { text: game.lastRank, size: big * pulse * (perfect ? 1.25 : 1), color },
+        { text: `+${game.lastScore} 点`, size: mid + 6 },
+        { text: `中心から ${off.toFixed(2)}m`, size: sm, bold: false },
+      ], cy);
+      if (perfect) drawConfetti();
+      break;
+    }
+    case S.DEAD: {
+      const t = game.timer;
+      const lines = [];
+      if (t > 0.9) lines.push({ text: 'R.I.P.', size: big, color: '#e0e0e0' });
+      if (t > 1.2) lines.push({ text: `享年 ${game.totalScore} ポイント`, size: mid });
+      if (t > 1.5) lines.push({ text: game.deathMsg, size: mid, color: '#ffb3b3' });
+      if (t > 1.5 && game.totalScore > 0 && game.totalScore >= game.highScore) lines.push({ text: 'NEW RECORD!', size: sm, color: '#ffe066' });
+      centerText(lines, cy - big / 2);
+      if (t >= CFG.DEATH_ANIM_TIME) drawMenu();
+      break;
+    }
+    case S.DEMO: {
+      const d = game.demo;
+      const head = { text: 'お手本デモ', size: mid, color: '#9ec5ff' };
+      if (!d.reachable) {
+        centerText([head, { text: 'この風では届かない距離でした…ごめん', size: sm, bold: false },
+          { text: blink ? (small ? 'タップでリトライ' : 'SPACE / タップでリトライ') : '', size: sm, color: '#ffe066' }], H * 0.3);
+        break;
+      }
+      const info = `速度 ${d.speed.toFixed(1)} m/s / 角度 ${d.angle}° / 崖の端で踏み切り`;
+      if (d.phase === 'run') {
+        centerText([head, { text: info, size: sm, bold: false },
+          { text: game.charging ? '端に着くタイミングで溜め終わる' : `${d.speed.toFixed(1)} m/s まで加速`, size: sm, bold: false, color: '#ffe066' }], H * 0.3);
+      } else if (d.phase === 'air') {
+        centerText([head, { text: info, size: sm, bold: false }], H * 0.3);
+      } else {
+        const off = Math.abs(game.landX - game.zoneCenter);
+        const lines = [head, { text: 'こう飛べば着地できた', size: mid + 4 }, { text: info, size: sm, bold: false },
+          { text: `中心から ${off.toFixed(2)}m`, size: sm, bold: false }];
+        if (game.timer >= 0.5 && blink) lines.push({ text: small ? 'タップでリトライ' : 'SPACE / タップでリトライ', size: sm, color: '#ffe066' });
+        centerText(lines, H * 0.3);
+      }
+      break;
+    }
+  }
+}
+
+function drawConfetti() {
+  ctx.save();
+  for (let i = 0; i < 40; i++) {
+    const seed = i * 7919;
+    const px = ((seed % 997) / 997) * W;
+    const fall = ((game.time * (40 + (seed % 50)) + seed) % (H + 40)) - 20;
+    ctx.fillStyle = `hsl(${(seed % 360)}, 90%, 60%)`;
+    ctx.save();
+    ctx.translate(px, fall);
+    ctx.rotate(game.time * 3 + i);
+    ctx.fillRect(-4, -2, 8, 4);
+    ctx.restore();
+  }
+  ctx.restore();
+}
+
+/* =========================================================================
+ *  メインループ(固定タイムステップ)
+ * ========================================================================= */
+let lastT = 0, acc = 0;
+function frame(t) {
+  if (!lastT) lastT = t;
+  let dt = (t - lastT) / 1000;
+  lastT = t;
+  if (dt > 0.1) dt = 0.1; // タブ切り替え等での暴走防止
+  acc += dt;
+  while (acc >= CFG.PHYSICS_STEP) {
+    update(CFG.PHYSICS_STEP);
+    acc -= CFG.PHYSICS_STEP;
+  }
+  render();
+  requestAnimationFrame(frame);
+}
+
+loadHighScore();
+resize();
+newGame();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
